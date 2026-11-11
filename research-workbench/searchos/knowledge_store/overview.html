@@ -1,0 +1,40 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>研究数据库 · 七类要素建表说明</title>
+<style>body{font:16px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;color:#183048;background:#f3f6fa;margin:0}
+main{max-width:1120px;margin:auto;padding:36px 24px}h1{font-size:30px}h2{font-size:23px}a{color:#0967ad}
+section,.card{background:white;padding:24px;margin:20px 0;border:1px solid #dbe5ed;border-radius:12px}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{text-align:left;padding:10px;border-bottom:1px solid #e2e9ef;vertical-align:top}
+code{overflow-wrap:anywhere;font-size:13px}nav{display:flex;gap:14px;flex-wrap:wrap}details{padding:10px 0}summary{cursor:pointer;font-weight:600}
+.stats{display:flex;gap:16px;flex-wrap:wrap}.stats span{padding:10px 16px;background:#edf5ff;border-radius:8px}
+@media(max-width:650px){main{padding:20px 12px}section,.card{padding:14px}table{font-size:12px}td,th{padding:6px}}</style>
+<main><h1>研究数据库 · 七类要素</h1><p>按用户提供的图片建立，首批专题为 Anduril；华为等后续专题复用同一套结构和字段。</p>
+<div class="stats"><span>7类要素 / 48个小点</span><span>@@TABLE_COUNT@@张表 / @@VIEW_COUNT@@个视图</span>
+<span>408项原字段 + @@EXTRA_FIELDS@@项框架补充字段</span><span>业务事实 @@CLAIM_COUNT@@ 条</span></div>
+<div class="card"><strong>当前交付：数据库与入库接口框架</strong><p>已建表、外键、关系字典、字段映射、来源版本、逐条证据、复核历史和维护任务表。
+已导入存量抽取结果，并接入后端接口和前端「知识资产」「原文资料」。产品和技术分别浏览，每个对象按七类48小点查看字段、来源和图谱；图谱从已有关系及组件、指标等关联表读取，支持分层展开、关系依据和跨对象跳转。
+维护工具中的「字段数据库」保留结构化结果导入、校验映射与SQL入库；未映射内容另行保留。
+模型抽取处于关闭状态，预设为6-luna低思考。本阶段验证使用已有数据和本地模拟结果，没有验证真实模型抽取成功。</p>
+<p>数据库：<code>@@DATABASE@@</code></p>
+<p><a href="schema.sql">SQL表结构</a> · <a href="field-mapping.csv">字段映射CSV</a> · <a href="field-mapping.json">字段映射JSON</a> ·
+<a href="inventory.json">校验与数量</a> · <a href="table-dictionary.json">表和列字典</a> ·
+<a href="queries.sql">关联查询示例</a> · <a href="pipeline.html">接口与入库流程</a></p></div>
+@@REFERENCE_IMAGE@@
+<nav>@@NAV@@</nav>@@SECTIONS@@
+<section><h2>跨表关联与维护规则</h2><p>entities提供统一对象ID，技术、路线、产品、组件、材料、工艺、团队、人员、机构、成果、事件和应用各有明细表。
+七类是浏览入口，记录通过entity_relations和participations连接。同一对象可加入多个专题，事实始终带topic_id。
+共性技术可以共享身份，企业采用事实必须在对应专题独立保存证据。</p>
+<p>claims保存事实主体、专题、适用条件、产品范围、有效时间、收录时间和复核状态；每条事实仅对应一类明细。
+claim_evidence连接来源版本中的连续原文引句。默认候选，补齐明细与支持证据后才能采纳。
+原文引句存在只代表结构检查通过，不能代替语义复核。</p>
+<p>性能观测必须指定测试条件记录，条件未披露时用partial空条件，不捏造条件。不同版本、日期、测试条件和冲突值分别保留；采纳视图不自动挑最新值或最大值。
+技术优势、短板、水平和成熟度进入评价表，明确来源声称或分析评价。分析评价可通过assessment_basis补充连接其依据观测，并保留支持来源。</p>
+<p>原文版本、片段、事实明细和证据禁止原地改写；修正时追加记录并撤回旧事实。复核决定、状态历史独立保留。
+maintenance_tasks支持优先级、任务去重、重试上限和下次执行时间；knowledge_gaps保存未检索、未找到、不披露、不适用和冲突。
+字段入库队列支持离线导入、处理回执和分块缓存；模型任务不会在当前配置下执行。
+缺口发现、补搜和本体推理仍是后续工作，不由字段入库自动推断。</p></section>
+<section><h2>操作方式</h2><p>在research-workbench目录执行：</p><pre>python3 scripts/manage_research_database.py init
+python3 scripts/manage_research_database.py check
+python3 scripts/manage_research_database.py export</pre>
+<p>init可重复运行，相同结构不会清库；目录或结构变化必须显式迁移。可用支持SQLite的软件打开数据库并执行SQL。
+机器校验包含完整性、外键、七类48小点、408原字段和全部映射目标。后续华为通过同一数据库的topics新增专题，复用表和字段。</p></section>
+<section><h2>所有表及列</h2>@@TABLES@@</section></main></html>

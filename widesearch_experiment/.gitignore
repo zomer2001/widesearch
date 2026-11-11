@@ -1,0 +1,9 @@
+.venv*/
+vendor/
+results/
+datasets/private/
+datasets/scoring_tasks.jsonl
+**/__pycache__/
+.pytest_cache/
+*.log
+.env

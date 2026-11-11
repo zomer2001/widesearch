@@ -1,0 +1,221 @@
+{
+  "name": "Anduril 公开资料 · 2026-10-23",
+  "files": [
+    {
+      "file": "01-09-Anduril Raises $1.5 Billion to Rebuild the Arsenal of Democracy.md",
+      "source_document_id": "doc_12bcde7b5d214bb7be466d40f0a5addd",
+      "origin": {
+        "corpus_document_id": "d_bdd703a9f48a19492f3e61b8873c430c23aad9a1aa8842e1190cb74b15affe68",
+        "fetched_at": "2026-10-23T09:35:37.787249+00:00",
+        "final_url": "https://www.anduril.com/news/anduril-raises-usd1-5-billion-to-rebuild-the-arsenal-of-democracy",
+        "original_html_sha256": "df243eda0f472d817b115775a0d756dd0e5391ae5c63ac7501d13cf54a784fed",
+        "published_at": "2024-08-07",
+        "request_url": "https://www.anduril.com/news/anduril-raises-usd1-5-billion-to-rebuild-the-arsenal-of-democracy",
+        "saved_form": "parsed_article_copy",
+        "sources": [
+          {
+            "corpus_document_id": "d_bdd703a9f48a19492f3e61b8873c430c23aad9a1aa8842e1190cb74b15affe68",
+            "fetched_at": "2026-10-23T09:35:37.787249+00:00",
+            "final_url": "https://www.anduril.com/news/anduril-raises-usd1-5-billion-to-rebuild-the-arsenal-of-democracy",
+            "original_html_sha256": "df243eda0f472d817b115775a0d756dd0e5391ae5c63ac7501d13cf54a784fed",
+            "published_at": "2024-08-07",
+            "request_url": "https://www.anduril.com/news/anduril-raises-usd1-5-billion-to-rebuild-the-arsenal-of-democracy",
+            "saved_form": "parsed_article_copy"
+          }
+        ]
+      }
+    },
+    {
+      "file": "02-05-Anduril Industries and Rheinmetall Partner to Design and Manufacture Barracuda, .md",
+      "source_document_id": "doc_58adbcafe2b0472fb5e9feab60e9f051",
+      "origin": {
+        "corpus_document_id": "d_3bbcc215995440de56f177e1a1fd085222b516b2d5891cb97cf738d34e2863dd",
+        "fetched_at": "2026-10-23T09:35:42.685633+00:00",
+        "final_url": "https://www.anduril.com/news/anduril-industries-and-rheinmetall-partner-to-design-and-manufacture-barracuda-fury-and-solid",
+        "original_html_sha256": "52b8bd90ce2c7a0980459ff1b9c63e33c1e6277b0a3080315cfffa8765ab636b",
+        "published_at": "2025-06-18",
+        "request_url": "https://www.anduril.com/news/anduril-industries-and-rheinmetall-partner-to-design-and-manufacture-barracuda-fury-and-solid",
+        "saved_form": "parsed_article_copy",
+        "sources": [
+          {
+            "corpus_document_id": "d_3bbcc215995440de56f177e1a1fd085222b516b2d5891cb97cf738d34e2863dd",
+            "fetched_at": "2026-10-23T09:35:42.685633+00:00",
+            "final_url": "https://www.anduril.com/news/anduril-industries-and-rheinmetall-partner-to-design-and-manufacture-barracuda-fury-and-solid",
+            "original_html_sha256": "52b8bd90ce2c7a0980459ff1b9c63e33c1e6277b0a3080315cfffa8765ab636b",
+            "published_at": "2025-06-18",
+            "request_url": "https://www.anduril.com/news/anduril-industries-and-rheinmetall-partner-to-design-and-manufacture-barracuda-fury-and-solid",
+            "saved_form": "parsed_article_copy"
+          }
+        ]
+      }
+    },
+    {
+      "file": "03-08-Introducing ArsenalOS™: Anduril’s Digital Manufacturing Backbone.md",
+      "source_document_id": "doc_769e7cfb30764e67a090bfee2c56246f",
+      "origin": {
+        "corpus_document_id": "d_aae684733f1e62518fd64a3067863063a9ab379cabeadbff3aff82dc82985c07",
+        "fetched_at": "2026-10-23T09:48:08.606827+00:00",
+        "final_url": "https://www.anduril.com/news/introducing-arsenalos-tm-anduril-s-digital-manufacturing-backbone",
+        "original_html_sha256": "dcd64c37067cffe06439d2f3f9394362ed5c5c01ecd15f729391004595eaf2c5",
+        "published_at": "2026-06-17",
+        "request_url": "https://www.anduril.com/news/introducing-arsenalos-tm-anduril-s-digital-manufacturing-backbone",
+        "saved_form": "parsed_article_copy",
+        "sources": [
+          {
+            "corpus_document_id": "d_aae684733f1e62518fd64a3067863063a9ab379cabeadbff3aff82dc82985c07",
+            "fetched_at": "2026-10-23T09:48:08.606827+00:00",
+            "final_url": "https://www.anduril.com/news/introducing-arsenalos-tm-anduril-s-digital-manufacturing-backbone",
+            "original_html_sha256": "dcd64c37067cffe06439d2f3f9394362ed5c5c01ecd15f729391004595eaf2c5",
+            "published_at": "2026-06-17",
+            "request_url": "https://www.anduril.com/news/introducing-arsenalos-tm-anduril-s-digital-manufacturing-backbone",
+            "saved_form": "parsed_article_copy"
+          }
+        ]
+      }
+    },
+    {
+      "file": "04-07-Arsenal-1: One Year In.md",
+      "source_document_id": "doc_a0170a45b1a949fbb15be3f418a777f7",
+      "origin": {
+        "corpus_document_id": "d_a5408f7e928db002a535137102974ae760a8f6aea7296415e4a1a38fb8bbfcbb",
+        "fetched_at": "2026-10-23T09:48:08.617278+00:00",
+        "final_url": "https://www.anduril.com/news/arsenal-1-one-year-in",
+        "original_html_sha256": "31b6c216d3ea7be1c4375dc6192b8ea2c12d2a85ccd71b23990814c7882d0983",
+        "published_at": "2026-01-30",
+        "request_url": "https://www.anduril.com/news/arsenal-1-one-year-in",
+        "saved_form": "parsed_article_copy",
+        "sources": [
+          {
+            "corpus_document_id": "d_a5408f7e928db002a535137102974ae760a8f6aea7296415e4a1a38fb8bbfcbb",
+            "fetched_at": "2026-10-23T09:48:08.617278+00:00",
+            "final_url": "https://www.anduril.com/news/arsenal-1-one-year-in",
+            "original_html_sha256": "31b6c216d3ea7be1c4375dc6192b8ea2c12d2a85ccd71b23990814c7882d0983",
+            "published_at": "2026-01-30",
+            "request_url": "https://www.anduril.com/news/arsenal-1-one-year-in",
+            "saved_form": "parsed_article_copy"
+          }
+        ]
+      }
+    },
+    {
+      "file": "05-06-Anduril Announces $5B Series H Raise.md",
+      "source_document_id": "doc_ba05bef160df40169c15e1435a0232d3",
+      "origin": {
+        "corpus_document_id": "d_43dcf621f733cfef8c9edbda9ec8ae528cec5d1b28e8869d55820e54f3bd2637",
+        "fetched_at": "2026-10-23T09:35:44.831712+00:00",
+        "final_url": "https://www.anduril.com/news/anduril-announces-usd5b-series-h-raise",
+        "original_html_sha256": "51af45e41c52f6bac9c2d47d6c408821bd30851b3486a9c0d958771901b3bd88",
+        "published_at": "2026-05-13",
+        "request_url": "https://www.anduril.com/news/anduril-announces-usd5b-series-h-raise",
+        "saved_form": "parsed_article_copy",
+        "sources": [
+          {
+            "corpus_document_id": "d_43dcf621f733cfef8c9edbda9ec8ae528cec5d1b28e8869d55820e54f3bd2637",
+            "fetched_at": "2026-10-23T09:35:44.831712+00:00",
+            "final_url": "https://www.anduril.com/news/anduril-announces-usd5b-series-h-raise",
+            "original_html_sha256": "51af45e41c52f6bac9c2d47d6c408821bd30851b3486a9c0d958771901b3bd88",
+            "published_at": "2026-05-13",
+            "request_url": "https://www.anduril.com/news/anduril-announces-usd5b-series-h-raise",
+            "saved_form": "parsed_article_copy"
+          }
+        ]
+      }
+    },
+    {
+      "file": "06-03-Anduril and Palantir to Accelerate AI Capabilities for National Security .md",
+      "source_document_id": "doc_ba1133681d1b4003afbad48de5e0ceed",
+      "origin": {
+        "corpus_document_id": "d_366b9ce1805a5d4c61dc01add28ce6f0073582f35d8b58b11624ef47a82a0d54",
+        "fetched_at": "2026-10-23T09:35:37.784198+00:00",
+        "final_url": "https://www.anduril.com/news/anduril-and-palantir-to-accelerate-ai-capabilities-for-national-security",
+        "original_html_sha256": "68fe4a90e4b69c8a25ea25e49ede2c77abb373bcab917227c333dfdf8c59feb4",
+        "published_at": "2024-12-06",
+        "request_url": "https://www.anduril.com/news/anduril-and-palantir-to-accelerate-ai-capabilities-for-national-security",
+        "saved_form": "parsed_article_copy",
+        "sources": [
+          {
+            "corpus_document_id": "d_366b9ce1805a5d4c61dc01add28ce6f0073582f35d8b58b11624ef47a82a0d54",
+            "fetched_at": "2026-10-23T09:35:37.784198+00:00",
+            "final_url": "https://www.anduril.com/news/anduril-and-palantir-to-accelerate-ai-capabilities-for-national-security",
+            "original_html_sha256": "68fe4a90e4b69c8a25ea25e49ede2c77abb373bcab917227c333dfdf8c59feb4",
+            "published_at": "2024-12-06",
+            "request_url": "https://www.anduril.com/news/anduril-and-palantir-to-accelerate-ai-capabilities-for-national-security",
+            "saved_form": "parsed_article_copy"
+          }
+        ]
+      }
+    },
+    {
+      "file": "07-02-Anduril Building Arsenal-1 Hyperscale Manufacturing Facility in Ohio.md",
+      "source_document_id": "doc_c1fcd7a9f5514febbbc3d5768ff1852b",
+      "origin": {
+        "corpus_document_id": "d_268d417b068c0a7d9360d996f6596bba1e3af524d6d75f41056a7b715841b2b3",
+        "fetched_at": "2026-10-23T09:48:09.875031+00:00",
+        "final_url": "https://www.anduril.com/news/anduril-building-arsenal-1-hyperscale-manufacturing-facility-in-ohio",
+        "original_html_sha256": "ebf70bb090dae4a9d337dd96c1b45e3573eafa1ed07204d3bbf296ca87490db3",
+        "published_at": "2025-01-16",
+        "request_url": "https://www.anduril.com/news/anduril-building-arsenal-1-hyperscale-manufacturing-facility-in-ohio",
+        "saved_form": "parsed_article_copy",
+        "sources": [
+          {
+            "corpus_document_id": "d_268d417b068c0a7d9360d996f6596bba1e3af524d6d75f41056a7b715841b2b3",
+            "fetched_at": "2026-10-23T09:48:09.875031+00:00",
+            "final_url": "https://www.anduril.com/news/anduril-building-arsenal-1-hyperscale-manufacturing-facility-in-ohio",
+            "original_html_sha256": "ebf70bb090dae4a9d337dd96c1b45e3573eafa1ed07204d3bbf296ca87490db3",
+            "published_at": "2025-01-16",
+            "request_url": "https://www.anduril.com/news/anduril-building-arsenal-1-hyperscale-manufacturing-facility-in-ohio",
+            "saved_form": "parsed_article_copy"
+          }
+        ]
+      }
+    },
+    {
+      "file": "08-04-Anduril Secures First NATO Contract: Lattice for eAirC2 Data Platform Initiative.md",
+      "source_document_id": "doc_c58bea09aee24de7ba640ca878d6423e",
+      "origin": {
+        "corpus_document_id": "d_38ace0f379fb518c19ee54274e0d0554cfb59b637e7b0a5b51d926f23ca7f5c7",
+        "fetched_at": "2026-10-23T09:35:39.375390+00:00",
+        "final_url": "https://www.anduril.com/news/anduril-secures-first-nato-contract-lattice-for-eairc2-data-platform-initiative",
+        "original_html_sha256": "4de2e3fb8e3a0963505ac2cd6dc9b997f3791162c02d6df405a9d109a12790d5",
+        "published_at": "2026-07-07",
+        "request_url": "https://www.anduril.com/news/anduril-secures-first-nato-contract-lattice-for-eairc2-data-platform-initiative",
+        "saved_form": "parsed_article_copy",
+        "sources": [
+          {
+            "corpus_document_id": "d_38ace0f379fb518c19ee54274e0d0554cfb59b637e7b0a5b51d926f23ca7f5c7",
+            "fetched_at": "2026-10-23T09:35:39.375390+00:00",
+            "final_url": "https://www.anduril.com/news/anduril-secures-first-nato-contract-lattice-for-eairc2-data-platform-initiative",
+            "original_html_sha256": "4de2e3fb8e3a0963505ac2cd6dc9b997f3791162c02d6df405a9d109a12790d5",
+            "published_at": "2026-07-07",
+            "request_url": "https://www.anduril.com/news/anduril-secures-first-nato-contract-lattice-for-eairc2-data-platform-initiative",
+            "saved_form": "parsed_article_copy"
+          }
+        ]
+      }
+    },
+    {
+      "file": "09-01-Command & Control.md",
+      "source_document_id": "doc_c70461a206814a4dbc36ab062062c074",
+      "origin": {
+        "corpus_document_id": "d_0d988c88f57d2511ac42236ec3d235e42df9b68273fa00e9e8f6387c98a49e3a",
+        "fetched_at": "2026-10-23T09:48:09.702084+00:00",
+        "final_url": "https://www.anduril.com/lattice/command-and-control",
+        "original_html_sha256": "30a9d73e9468bc6baeececf5c3afc29a867648c875874e20abba6cdfa5d1c853",
+        "published_at": null,
+        "request_url": "https://www.anduril.com/lattice/command-and-control",
+        "saved_form": "parsed_article_copy",
+        "sources": [
+          {
+            "corpus_document_id": "d_0d988c88f57d2511ac42236ec3d235e42df9b68273fa00e9e8f6387c98a49e3a",
+            "fetched_at": "2026-10-23T09:48:09.702084+00:00",
+            "final_url": "https://www.anduril.com/lattice/command-and-control",
+            "original_html_sha256": "30a9d73e9468bc6baeececf5c3afc29a867648c875874e20abba6cdfa5d1c853",
+            "published_at": null,
+            "request_url": "https://www.anduril.com/lattice/command-and-control",
+            "saved_form": "parsed_article_copy"
+          }
+        ]
+      }
+    }
+  ]
+}

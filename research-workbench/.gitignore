@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Workspace (runtime generated)
+searchos_workspace/
+.searchos/
+local-index/
+knowledge_base
+searchos_skill_jobs/
+eval_workspace/
+test_workspace/
+/tmp/workspace_checks/
+baseline_output/
+eval_results/
+/eval/
+paper/
+
+datasets/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Caches
+.mypy_cache/
+.ruff_cache/
+.page_cache/
+
+# Claude
+.claude/
+# Remotion demo-video project (excluded from OSS release — Remotion license)
+demo_video/
+
+# Local mock route used while producing the product demo
+web/frontend/src/app/demo/
+
+# Web settings overlay (user-local, written by the web UI)
+web_settings.json
+
+# Local design and iteration plans (kept outside release-facing docs)
+development/
+docs/searchanything-technical-design.md
+docs/development/
+docs/diagnostics/
+docs/validation/
+docs/adaptive-explore.md
+docs/browser-source-metadata.md
+docs/extraction-architecture.md
+docs/extraction-prompts.md
+docs/knowledge-management.md
+docs/middleware-components-plan.md
+docs/middleware-refactor.md
+docs/skill_design.md
+
+# Local publication assets (not part of the repository)
+doc/pub/assets/
+
+CONTEXT.md
+
+# 本机私有配置和运行记录
+.workbench/
+data/
+
+.runtime/

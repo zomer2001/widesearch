@@ -1,0 +1,12 @@
+{
+  "profile": "B_official_native_template_NOT_EXECUTED",
+  "ready": false,
+  "instruction": "Use each pinned repository's documented native model profile. Supply endpoint/key environment variables before enabling; never substitute the unified-model result and call it native.",
+  "mindsearch": {"official_model_format": "internlm_server", "model": "internlm/internlm2_5-7b-chat", "alternative_official_profile": "gpt4"},
+  "open_deep_research": {"research_model": "openai:gpt-4.1", "summarization_model": "openai:gpt-4.1-mini", "search_api": "tavily"},
+  "searchos": {"profiles_source": "vendor/searchos/searchos/config/profiles.py", "roles_source": "vendor/searchos/searchos/config/profiles.py"},
+  "ours": {"profiles_source": "snapshots/<frozen-source>/searchos/config/profiles.py"},
+  "scrapy": {"native_planner": null, "requires_common_search_and_extractor": true},
+  "crawl4ai": {"native_strategy": "AdaptiveCrawler statistical", "extractor": "LLMExtractionStrategy"},
+  "status": "Configuration B requires native model services/search credentials; current actual campaign is configuration A only."
+}

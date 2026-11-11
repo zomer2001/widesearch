@@ -1,0 +1,409 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:workbench:knowledge-extraction:20261104:v1",
+  "title": "现有资料的知识库字段抽取结果",
+  "description": "仅适用于原文采集后的知识库抽取，不是 SearchOS 搜索或采集表结构。字段 ID、类型和适用组另由 field_catalog.v1.json 校验。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_id",
+    "status",
+    "entities",
+    "relations",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "anduril_knowledge_fields_v1_20261104"
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "extracted",
+        "no_relevant_content"
+      ]
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entity"
+      }
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/relation"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "measurement": {
+      "description": "保留原始数字、单位及范围；operator保留大于、小于、近似等限定。1080p等非纯数字规格可用raw保存。未知字段须省略，不输出null或空measurement对象。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "raw"
+      ],
+      "properties": {
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "min": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "max": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "raw": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operator": {
+          "enum": [
+            "=",
+            ">",
+            ">=",
+            "<",
+            "<=",
+            "approx"
+          ]
+        }
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field_id",
+        "value",
+        "quote",
+        "qualifiers"
+      ],
+      "properties": {
+        "field_id": {
+          "type": "string",
+          "pattern": "^(product|technology)_[a-z0-9_]+$"
+        },
+        "value": {
+          "description": "实际类型须匹配字段目录value_type。未知字段直接省略，不提交value:null。",
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "not": {
+                "enum": [
+                  "未知",
+                  "未找到",
+                  "暂无",
+                  "—",
+                  "unknown",
+                  "null"
+                ]
+              }
+            },
+            {
+              "type": [
+                "number",
+                "boolean"
+              ]
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            {
+              "$ref": "#/$defs/measurement"
+            }
+          ]
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1
+        },
+        "qualifiers": {
+          "description": "按资料有无填写；缺失可省略。row_key 对同一重复行中的各字段保持相同值。其他条件允许原样短文本扩展。",
+          "type": "object",
+          "properties": {
+            "row_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "condition": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "date": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "variant": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "measurement_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_key",
+        "kind",
+        "namespace",
+        "name",
+        "identity_quote",
+        "fields"
+      ],
+      "properties": {
+        "entity_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "product",
+            "technology"
+          ]
+        },
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity_quote": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/field"
+          }
+        }
+      }
+    },
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_key",
+        "target_key",
+        "predicate",
+        "field_id",
+        "quote"
+      ],
+      "properties": {
+        "source_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "predicate": {
+          "enum": [
+            "uses_technology",
+            "supports_function",
+            "subtechnology_of",
+            "implements",
+            "reference_for",
+            "variant_of",
+            "part_of",
+            "integrates",
+            "carries",
+            "deploys",
+            "evolves_from",
+            "replaces"
+          ]
+        },
+        "field_id": {
+          "description": "可为空；非空时须为目录中可挂技术关联的产品具体功能、boolean能力或其他功能字段。",
+          "enum": [
+            null,
+            "product_supports_unattended_operation",
+            "product_supports_target_sensing",
+            "product_supports_radar_sensing",
+            "product_supports_visible_light_sensing",
+            "product_supports_infrared_sensing",
+            "product_supports_rf_sensing",
+            "product_supports_signal_sensing",
+            "product_supports_acoustic_sensing",
+            "product_supports_underwater_acoustic_sensing",
+            "product_supports_wide_area_search",
+            "product_supports_night_sensing",
+            "product_sensing_other_features",
+            "product_supports_object_detection",
+            "product_supports_classification",
+            "product_supports_fine_grained_recognition",
+            "product_supports_identification_friend_foe",
+            "product_supports_behavior_recognition",
+            "product_supports_intent_recognition",
+            "product_supports_anomaly_detection",
+            "product_recognition_other_features",
+            "product_supports_single_object_tracking",
+            "product_supports_multi_object_tracking",
+            "product_supports_cross_sensor_tracking",
+            "product_supports_track_reacquisition",
+            "product_supports_trajectory_prediction",
+            "product_supports_automatic_gaze_tracking",
+            "product_tracking_other_features",
+            "product_supports_multi_source_fusion",
+            "product_supports_target_association_deduplication",
+            "product_supports_cross_domain_fusion",
+            "product_supports_situation_picture",
+            "product_fusion_other_features",
+            "product_supports_publish_subscribe",
+            "product_supports_topic_filtering",
+            "product_supports_priority_delivery",
+            "product_supports_disconnected_operation",
+            "product_supports_reconnection_sync",
+            "product_supports_self_organizing_network",
+            "product_supports_mesh_network",
+            "product_supports_multi_link_switching",
+            "product_supports_encrypted_communication",
+            "product_supports_jam_resistant_communication",
+            "product_supports_satellite_link",
+            "product_supports_protocol_conversion",
+            "product_supports_gateway",
+            "product_communication_other_features",
+            "product_supports_multi_platform_coordination",
+            "product_supports_swarm_coordination",
+            "product_supports_formation",
+            "product_supports_dynamic_task_allocation",
+            "product_supports_heterogeneous_platforms",
+            "product_supports_human_machine_teaming",
+            "product_supports_cross_domain_coordination",
+            "product_coordination_other_features",
+            "product_supports_mission_planning",
+            "product_supports_route_planning",
+            "product_supports_path_planning",
+            "product_supports_obstacle_avoidance",
+            "product_supports_dynamic_replanning",
+            "product_supports_sensor_scheduling",
+            "product_supports_resource_allocation",
+            "product_supports_scenario_reasoning",
+            "product_supports_simulation",
+            "product_planning_other_features",
+            "product_supports_mapping",
+            "product_supports_automatic_takeoff",
+            "product_supports_automatic_landing",
+            "product_supports_automatic_return",
+            "product_supports_gnss_denied_navigation",
+            "product_supports_remote_control",
+            "product_supports_automatic_interception",
+            "product_control_other_features",
+            "product_supports_edge_processing",
+            "product_supports_data_storage",
+            "product_supports_data_recording",
+            "product_supports_replay",
+            "product_supports_historical_query",
+            "product_supports_data_import",
+            "product_supports_data_export",
+            "product_supports_software_ota",
+            "product_supports_model_ota",
+            "product_supports_training_data_feedback",
+            "product_supports_role_permissions",
+            "product_supports_multiple_classification_domains",
+            "product_data_management_other_features",
+            "product_provides_sdk",
+            "product_provides_api",
+            "product_provides_developer_documentation",
+            "product_supports_third_party_sensors",
+            "product_supports_third_party_platforms",
+            "product_supports_third_party_effectors",
+            "product_supports_plugins",
+            "product_supports_apps",
+            "product_standard_interfaces",
+            "product_provides_simulator",
+            "product_provides_digital_twin",
+            "product_integration_other_features",
+            "product_supports_authentication",
+            "product_supports_zero_trust",
+            "product_supports_remote_diagnostics",
+            "product_supports_self_test",
+            "product_supports_health_management",
+            "product_operations_security_other_features",
+            "product_replaceable",
+            "product_requires_cloud",
+            "product_embedded_edge_processing",
+            "product_reusable",
+            "product_supports_underwater_acoustic_communication",
+            "product_requires_human_authorization"
+          ]
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

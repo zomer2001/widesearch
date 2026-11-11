@@ -1,0 +1,50 @@
+{
+  "widesearch": {
+    "commit": "9825ba7b140b71d81b364793f86dabe4cfed6749",
+    "remote": "https://github.com/ByteDance-Seed/WideSearch.git",
+    "dirty": false,
+    "licenses": {
+      "LICENSE": "85f7708bd9998d5f81e1f5523b68acc43123cb6b5abd7d8dd08fa133e68a795d"
+    }
+  },
+  "searchos": {
+    "commit": "0aa92bab31f6c55bfc69b74459b9a01c6b697a6b",
+    "remote": "https://github.com/antins-labs/SearchOS.git",
+    "dirty": false,
+    "licenses": {
+      "LICENSE": "6ba4862ad67c175514da88cc328293a3b335c89a4908f238eb843ea99e490d14"
+    }
+  },
+  "mindsearch": {
+    "commit": "7952c5f8a956fe6a44228a6a7d528a35340e7c87",
+    "remote": "https://github.com/InternLM/MindSearch.git",
+    "dirty": false,
+    "licenses": {
+      "LICENSE": "9424a68484e9164bb9d81d71283c60dd79adb54af73e5222b008bbfe220e4a50"
+    }
+  },
+  "open_deep_research": {
+    "commit": "1b7d2e80db9faa586165c60e09096dbbfd483a64",
+    "remote": "https://github.com/langchain-ai/open_deep_research.git",
+    "dirty": false,
+    "licenses": {
+      "LICENSE": "3404cb66935968edefe1149c9bfcb44bd8532c437c01ac095ec53b6e195ce110"
+    }
+  },
+  "scrapy": {
+    "commit": "20df334115ca4d8a3fe246ac644049ca18749026",
+    "remote": "https://github.com/scrapy/scrapy.git",
+    "dirty": false,
+    "licenses": {
+      "LICENSE": "fd331af3ccb8776bbe7f317821e5e0b91c2ab7c73464e77425d52204f7b5d980"
+    }
+  },
+  "crawl4ai": {
+    "commit": "5bc33f4ec398e7721b90799dcac6b839e49968f1",
+    "remote": "https://github.com/unclecode/crawl4ai.git",
+    "dirty": false,
+    "licenses": {
+      "LICENSE": "193fe32704bee15cd74f5153e569cdf830e26445e19798a55daee32da40758aa"
+    }
+  }
+}

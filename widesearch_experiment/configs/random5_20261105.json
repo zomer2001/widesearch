@@ -1,0 +1,36 @@
+{
+  "seed": 20261105,
+  "sampling": "uniform_without_replacement_from_public_tasks_only",
+  "systems": [
+    "searchos",
+    "ours"
+  ],
+  "trials": 1,
+  "tasks": [
+    {
+      "instance_id": "ws_en_033",
+      "query": "Please organize the following data for Apple, Amazon, Google, Microsoft, and Netflix over the five-year period from 2020 to 2024: Total revenue (in billions of US dollars), Operating profit according to International Financial Reporting Standards (in billions of US dollars), Operating profit margin, and Free cash flow (FCF, in billions of US dollars). Please quote the data from the financial reports of the company. Mark the data that cannot be found with \"-\". The value should be specified to two decimal places\n\nPlease output the organized data in one Markdown table format.\nThe column names in the table are as follows in sequence:\nCompany, Year, Total Revenue(Billion), Operating Profit(Billion), Operating Profit Margin, FCF(Billion)\n\nDon't ask me any questions, just output the results according to the column without omitting cells arbitrarily. The output format is ```markdown\n{data_content}\n```.",
+      "language": "en"
+    },
+    {
+      "instance_id": "ws_zh_075",
+      "query": "帮我统计下2024年1月-2024年12月在Netflix播出的韩剧，需要了解作品名称，开播时间，作品导演，作品集数，作品及作品演员、导演等因该作品获得的奖项（只要百想艺术和青龙的奖项，提名的也算）。作品集数列单位为集，填写需输出数字和单位，如“xx集”；若没有获得任何奖项，则用“/”代替。请以一整个Markdown表格的格式输出整理后的数据，不要拆分成多个markdown表格，每个单元格都需要按列名要求输出，不得无故省略，输出采用中文。\n表格中的列名依次为：\n作品名称，开播时间，作品导演，作品集数，作品相关获奖记录。不要问我任何问题，只需输出结果，输出格式为```markdown{数据内容}```",
+      "language": "zh"
+    },
+    {
+      "instance_id": "ws_en_039",
+      "query": "Please provide a list of the top 50 universities in the QS 2026 World University Rankings, including each university’s rank, university name, founding year, country, and specific address of its main campus.\n\nPlease organize the results in one Markdown table with the following columns:\nrank, university name, founding year, country, specific address\n\nDon't ask me any questions, just output the results according to the columns without omitting cells arbitrarily. The output format is ```markdown\n{data_content}\n```.",
+      "language": "en"
+    },
+    {
+      "instance_id": "ws_zh_055",
+      "query": "我在研究中国教育普及趋势，请你帮我整理一份2008-2024年来，中国的初中、普通高中和普通高等教育的相关数据，包括院校数量、专任教师数量、招生数量、毕业生数量，数量单位统一为\"万\"，保留2位小数，例如10万所、7.58万人等。若数据不详，使用\"/\"占位。数据需要来源于权威性的单位，例如国家统计局、国家教育部等。请以一整个Markdown表格的格式输出整理后的数据，不要拆分成多个markdown表格，每个单元格都需要按列名要求输出，不得无故省略，输出采用中文。\n表格中的列名依次为：年份、教育阶段、院校数量(万所)、专任教师数量(万人)、招生数量(万人)、毕业生数量(万人)。不要问我任何问题，只需输出结果，输出格式为```markdown{数据内容}```",
+      "language": "zh"
+    },
+    {
+      "instance_id": "ws_en_026",
+      "query": "Help me collect the basic electoral information of 50 U.S. states in 2024. 1) the number of congressional districts; 2) number of electors; 3) the name of the governor in 2024 and his/her party affiliation, like \"Gavin Newsom (D)\"; 4) the names of the two senators in 2024 and their party affiliations separately.\n\nPlease present the information in one Markdown table with these column headers: State, Number of Congressional Districts, Number of Electors, Governor (Party), Senator 1 (Party) & Senator 2 (Party) \n\nDon't ask me any questions, just output the results according to the columns without omitting cells arbitrarily. The output format is ```markdown\n{data_content}\n```.\n\nFor example, \n```markdown\n| State           | Number of Congressional Districts | Number of Electors | Governor (Party)     | Senator 1 (Party)& Senator 2 (Party) |\n|-----------------|-----------------------------------|--------------------|----------------------|-------------------|-------------------|\n| Alabama         | 7                                 | 9                  | Kay Ivey (R)         | Tommy Tuberville (R)& Katie Britt (R)   |",
+      "language": "en"
+    }
+  ]
+}

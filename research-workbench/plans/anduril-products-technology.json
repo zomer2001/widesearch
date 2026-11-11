@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "title": "Anduril 产品谱系、技术路线、成熟度与独立复现单元",
+  "engine": "openai",
+  "model": "gpt-4o",
+  "common_prompt": "你正在为用户建设 Anduril 产品与技术知识库。本任务只采集公开资料，围绕产品谱系、技术机制与路线、成熟度证据及独立开源参考实现形成可追溯记录。\n\n研究原则：\n1. 产品谱系是主索引，保留公司来源、产品系列、具体型号与版本、改名、被替代和继承关系。先核对本次运行日期的官网导航、产品页、新闻与历史公告，种子名称仅用于发现，不能认定清单完整或状态已确认。\n2. 正文必须实际打开并保存。优先技术手册/数据表/PDF、官方开发文档与公开代码、政府或独立测试文件、论文、采购公开文件，再使用新闻稿和媒体。保留原文、网址、发布日期与采集时间。搜索摘要、目录、模型记忆不能充当技术证据。\n3. 为每个产品写技术卡片：系统组成与各子系统作用、数据流与软硬件分工、感知/计算/通信/自主功能的公开机制、接口与兼容性、参数及条件、设计取舍、实测与部署证据、未公开问题。将“AI驱动/自主/协同/全天候/模块化”拆解为输入、处理、输出、约束和可观察的验证；只出现宣传措辞时如实注明。\n4. 参数保留原始值、单位、上限/下限/范围/典型值、型号、配置、环境、测量条件、时间和原文位置。缺失字段写null。不同型号、不同条件的数字不能拼成一个产品。概念图/规划/专利、产品公告、公开试验、量产、交付、实际使用分别记录。\n5. 技术路线记录要解决的问题、输入输出、处理步骤的概念性机制、关键组件、必要条件、取舍与替代路线；区分产品已明确采用、只有相似机制、以及分析推断。公开证据不足时不能断言内部算法、训练数据或组件实现。\n6. 成熟度分产品、组件、技术路线和外部项目四种范围。记录论据、日期、适用条件、反证和未知项。采用unknown/concept/lab_demo/integrated_prototype/field_demo/production/deployed这些描述性阶段，保留source_stage原文。只有来源明确给出TRL才记录官方TRL；自行评估写inferred和范围及依据。合同不能等同交付或达标，公开部署不等同每个算法成熟。\n7. 独立复现单元从外部GitHub/GitLab、论文官方代码、官方软件项目寻找。每项记录对应的机制/路线、仓库地址、固定版本或commit、许可证、具体代码路径与示例、依赖和硬件条件、输入数据、输出、步骤、验收标准、差异和限制。它们是外部参考实现，只有明确证据才能说Anduril使用该代码。先核对仓库与文档，未实际执行一律execution_status=not_run；不得声称复现了专有系统。无需运行下载来的代码。\n8. 每条技术主张关联短原文引句和段落/页码/章节；区分厂商宣称、独立试验和分析判断。转载同一稿件保留来源链，不能当独立交叉验证。相互冲突的说法同时保存，不擅自选最大参数值。不要为凑字段或覆盖率编造内容。\n9. 在公开机制、接口兼容性、科研与通用工程验证范围内工作。复现单元采用通用仿真/公开数据和研究示例，不生成武器制造、打击控制或战术操作步骤。\n10. 先处理本批范围，逐项保留真实阅读证据。时间不足时提交已有资料和明确缺口，不能把未完成项目标为完成。中文撰写、保留英文原名。在报告注明检索截止日期。\n\n输出：先用Markdown给出本批实质发现、产品/路线对照表、成熟度依据、证据与缺口。报告末尾单独放一个完整的json代码块，schema如下。只输出本批有证据的新记录，空类别用[]；字符串ID尽量沿用前序产品索引，推荐product:ghost-x、technology:sensor-fusion、route:track-level-fusion这类格式。引用ID须对应本批evidence，跨批已有ID尽量复用。\n{\n \"schema_version\":1,\n \"products\":[{\"id\":\"product:...\",\"name\":\"...\",\"aliases\":[],\"kind\":\"family|model|component|platform\",\"parent_id\":null,\"status\":\"...\",\"status_date\":null,\"architecture\":\"公开的系统组成与数据流，未公开留空\",\"subsystems\":[],\"interfaces\":[],\"parameters\":[{\"metric\":\"...\",\"raw_value\":\"...\",\"normalized_value\":null,\"unit\":null,\"measurement_kind\":\"single|range|upper_bound|lower_bound|approximate|text\",\"variant\":\"...\",\"conditions\":[],\"as_of\":null,\"evidence_ids\":[]}],\"design_tradeoffs\":[],\"uncertainties\":[],\"technology_ids\":[],\"evidence_ids\":[]}],\n \"product_relations\":[{\"id\":\"relation:...\",\"from_id\":\"product:...\",\"relation\":\"variant_of|part_of|derived_from|replaces|renamed_from\",\"to_id\":\"product:...\",\"valid_time\":null,\"evidence_ids\":[]}],\n \"technologies\":[{\"id\":\"technology:...\",\"name\":\"...\",\"problem\":\"...\",\"mechanism\":\"...\",\"inputs\":[],\"outputs\":[],\"product_ids\":[],\"route_ids\":[],\"adoption_status\":\"explicit|inferred|unknown\",\"evidence_ids\":[]}],\n \"technology_routes\":[{\"id\":\"route:...\",\"name\":\"...\",\"technology_ids\":[],\"mechanism\":\"...\",\"components\":[],\"assumptions\":[],\"tradeoffs\":[],\"alternative_routes\":[],\"product_ids\":[],\"adoption_status\":\"explicit|inferred|reference_only|unknown\",\"evidence_ids\":[]}],\n \"maturity_assessments\":[{\"id\":\"maturity:...\",\"subject_id\":\"product:...\",\"assessment_scope\":\"product|component|route|open_source_project\",\"stage\":\"unknown|concept|lab_demo|integrated_prototype|field_demo|production|deployed\",\"source_stage\":null,\"assessment_type\":\"source_reported|inferred\",\"trl\":null,\"as_of\":null,\"basis\":\"...\",\"conditions\":[],\"limitations\":[],\"evidence_ids\":[]}],\n \"reproduction_units\":[{\"id\":\"unit:...\",\"name\":\"...\",\"route_ids\":[],\"technology_ids\":[],\"product_ids\":[],\"repo_url\":\"https://github.com/owner/repo\",\"ref\":null,\"commit\":null,\"license\":null,\"code_paths\":[],\"inputs\":[],\"outputs\":[],\"dependencies\":[],\"hardware\":[],\"steps\":[],\"acceptance_criteria\":[],\"limitations\":[],\"relationship\":\"independent_reference\",\"execution_status\":\"not_run\",\"evidence_ids\":[]}],\n \"evidence\":[{\"id\":\"evidence:...\",\"source_url\":\"https://...\",\"title\":\"...\",\"published_at\":null,\"source_type\":\"technical_document|official_announcement|test_report|procurement|paper|patent|repository|media\",\"claim\":\"...\",\"quote\":\"短原文引句\",\"location\":\"页码/章节/段落\",\"evidence_status\":\"manufacturer_claim|independent_test|public_demonstration|documented_release|inference\",\"origin_url\":null}]\n}\nID与对象举例仅说明字段格式，不是已核验事实。不能用示例内容填充结果。对于代码块输出长度，优先保存本批关键记录，余项在缺口中明确列出，保留完整合法JSON。",
+  "tasks": [
+    {
+      "id": "01-product-lineage",
+      "title": "产品总谱系与版本索引",
+      "prompt": "核对Anduril官网当前全部产品导航、产品系列、具体型号、收购后整合产品和历史版本。输出产品树、系列-型号-组件关系和状态日期。核对命名、别名、继承/替代与被收购来源；记录无法确认的分支。为后续各批提供目录，指出每种产品属于软件/计算通信/感知/航空/海事/制造支撑中的哪一类。不要将纯新闻提及认定为独立产品，也不要把公司收购关系当成产品继承关系。每个目录节点附实际打开来源。",
+      "effort": "medium",
+      "max_time": 600
+    },
+    {
+      "id": "02-lattice-software",
+      "title": "Lattice与共用软件：数据融合、自主与集成架构",
+      "prompt": "基于产品索引，深入核对Lattice及其公开软件模块、Mesh或其他共用软件名称的真实性与版本。追踪信息采集-时间/坐标对齐-融合-状态管理-任务/人工监督-对外接口的公开架构；软件与边缘硬件如何分工，哪些机制有公开证据，哪些只是功能宣称。寻找开发资料、论文、专利及第三方技术文件，明确专利不证明产品采用。梳理候选技术路线，接口只写公开协议/兼容性与通用机制。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "03-sensing",
+      "title": "传感产品与多源感知：传感器、融合与工程条件",
+      "prompt": "从索引核实Sentry、WISP、Spyglass及其他实际存在的感知系列/型号。按型号记录公开传感器类别、计算链路、多传感器融合机制、被动/主动感知的公开工程取舍、环境条件、校准与试验证据。将硬件组成、软件算法类别、系统级能力分别记录，不能从名称推导内部实现。保留可比较参数的条件和日期；聚焦工程原理及观测验证。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "04-edge-network",
+      "title": "边缘计算与通信产品：分布式架构与系统互联",
+      "prompt": "从索引核实Menace系列、Lattice Mesh及其他边缘计算/网络相关产品。调查公开的计算/网络分层、节点角色、数据流、连接与离线条件、开放接口/兼容系统、部署依赖及已公开测试。技术路线重点覆盖边缘计算、消息传输、数据分发、分布式状态与系统集成；分开记录自主软件能力与硬件规格。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "05-rf-systems",
+      "title": "公开射频与电子系统技术：组件角色与证据",
+      "prompt": "从索引核实Pulsar/Pulsar-L及其他公开射频/电子系统产品，记录版本、公开的软件定义架构、传感与计算组件角色、系统接口、实验/部署节点与证据强度。解释公开技术机制和工程条件；未公开的内部算法或性能留空。范围为公开系统概念、研究验证与接口，不生成干扰参数配置、作战运用或实施步骤。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "06-air-small",
+      "title": "航空产品谱系之一：小型无人平台与版本差异",
+      "prompt": "按索引处理Ghost/Ghost-X、ALTIUS、Bolt及实际发现的同类系列。对每个系列区分具体型号、平台/载荷/软件，记录公开的机体与能源特征、通用导航/感知/计算/通信架构、模块接口、参数条件及公开试验。重点解释技术路线与取舍及证据，不写武器使用/制造方法；同类通用开源仿真仅作为后续参考实现线索。未覆盖的型号完整列入缺口。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "07-air-other",
+      "title": "航空产品谱系之二：其他航空系统及公开技术证据",
+      "prompt": "按索引核实Fury、Omen、Barracuda、Roadrunner及其他尚未被06覆盖的航空系列；名称仅是发现种子，以官网核对为准。保存型号与历史继承关系、公开子系统、软件/硬件分工、集成接口、实验条件和成熟度里程碑。对可能涉及武器的产品只整理公开参数、总体架构与验证证据，禁止制造/制导/打击控制实施细节。查明每一项性能表述是设计目标、厂商宣称还是公开测试。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "08-maritime",
+      "title": "海事与海底系统：平台、感知、导航与能源路线",
+      "prompt": "按索引核实Dive-LD、Dive-XL、Seabed Sentry、Copperhead及其他海事产品的系列/型号和来源。聚焦公开的水下导航与定位、环境感知、能源/续航条件、通信类别、任务载荷接口、平台软件分工、试验与交付节点。按型号和海况等条件保存参数，数据缺失不可套用同类产品。复现方向限定通用机器人仿真与公开海洋数据，不提出攻击或作战控制方案。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "09-manufacturing",
+      "title": "工程实现与制造支撑：数字化、模块化及质量证据",
+      "prompt": "按索引核实ArsenalOS与制造支撑相关公开技术，关注数字化制造软件、数字线程、配置/版本管理、模块接口、系统测试、供应链和质量追溯的机制与证据。区分软件模块、工厂设施和产品；公开产能规划与实际产能分开。重点分析技术路线如何支撑迭代与规模制造，不收集武器制造工艺配方或实施步骤。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "10-route-maturity",
+      "title": "跨产品技术路线与成熟度证据审计",
+      "prompt": "将前序保存资料中的共性技术分解成路线，例如多源融合、机器人定位、分布式边缘计算、消息与数据管理、模块化系统集成、仿真与测试。为每条路线记录问题、输入输出、机制、必要条件、替代路线与取舍，并关联具体产品及证据。逐产品/组件/路线独立分析成熟度：原始公告、公开试验、采购合同、交付、实际使用各说明能支持什么阶段。追查时间、范围、冲突与证据缺口，不给缺乏依据的TRL数字。前序目录只是线索，引用须来自真实原文。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "11-external-software",
+      "title": "外部独立复现单元：软件、数据处理与分布式基础",
+      "prompt": "从外部GitHub/GitLab及论文代码寻找与已确认技术路线机制相近的通用软件参考实现，优先有文档、示例数据、测试和明确许可证的项目。可检索ROS 2/DDS、Cyclone DDS、MCAP、Open3D、GTSAM等作为候选方向，不能直接认定其被Anduril使用。每个单元限定一个明确功能；给出仓库、具体示例与代码路径、固定版本/commit、许可证、输入输出、依赖、步骤、验收指标、与对应产品的差异。优先2-4个可具体描述的单元，余项列缺口；不执行项目代码，execution_status=not_run。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "12-external-robotics",
+      "title": "外部独立复现单元：定位、机器人仿真与工程测试",
+      "prompt": "从外部官方代码或论文项目寻找定位/建图、传感器融合、通用机器人仿真、数据回放和系统接口测试的独立参考实现。可检索RTAB-Map、公开VIO项目、Gazebo及公开机器人仿真项目作为种子；优先可用CPU/本机或明确标注硬件需求的离线示例。每个单元必须定位具体示例与数据集，记录环境、固定代码版本、许可证、输入输出、可操作步骤和验收标准，并注明只有机制对应而非专有产品等价复现。收集研究示例，不写战术或武器化集成步骤。未运行标not_run。",
+      "effort": "medium",
+      "max_time": 900
+    },
+    {
+      "id": "13-coverage-audit",
+      "title": "产品—技术—路线—成熟度—复现单元总核对",
+      "prompt": "核对产品总谱系是否有遗漏，并检查每种产品是否关联技术、每种技术是否有路线、成熟度是否有时间与证据、外部复现单元是否有有效仓库/代码路径/版本/许可证/输入输出/验收标准。针对重要缺失字段做定向补采。输出总产品树、产品技术矩阵、技术路线图的关系表、成熟度对照、复现单元目录、冲突清单及未覆盖项。真实缺口必须保留，不能把未运行项目写为已复现。优先输出本批核实的新关系与修订记录，不复制所有旧记录填满JSON。",
+      "effort": "medium",
+      "max_time": 900
+    }
+  ]
+}

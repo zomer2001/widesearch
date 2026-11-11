@@ -1,0 +1,128 @@
+@prefix p1: <urn:searchos:p1:> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix time: <http://www.w3.org/2006/time#> .
+
+p1: a owl:Ontology ;
+    rdfs:label "SearchOS P1 claim and repair vocabulary"@en ;
+    owl:versionInfo "0.1" ;
+    rdfs:comment "A small vocabulary for sourced claims and execution dependencies. Finite Python rules perform the prototype's temporal checks and repair decisions; this file does not implement Pellet, SWRL, or the full ODL method. RDFS domains and ranges describe meaning, not closed-world validation constraints. Missing dates remain unknown."@en .
+
+p1:Claim a owl:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:comment "A particular sourced assertion, not the business entity itself and not an assertion of universal truth. Distinct claims may state different values about the same entity, attribute and scope. Acceptance and revision are application decisions; no functional properties or identity axioms merge competing claims."@en .
+
+p1:SourceObservation a owl:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:comment "An immutable observation of source content. A changed source creates another observation; revisions do not rewrite the original observation."@en .
+
+p1:DerivedArtifact a owl:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:comment "A versioned summary, plan, or other derived state whose evidence and artifact dependencies can become stale."@en .
+
+p1:Execution a owl:Class ;
+    rdfs:subClassOf prov:Activity ;
+    rdfs:comment "One execution that consumes specific evidence or artifact versions. The recorded read set is a conservative dependency approximation, not a causal graph."@en .
+
+p1:RevisionEvent a owl:Class ;
+    rdfs:subClassOf prov:Activity ;
+    rdfs:comment "An auditable repair event. Idempotency, version checks, and atomic state changes are enforced by the application, not by OWL."@en .
+
+p1:evidenceId a owl:DatatypeProperty ;
+    rdfs:domain p1:Claim ;
+    rdfs:range xsd:string .
+
+p1:entity a owl:DatatypeProperty ;
+    rdfs:domain p1:Claim ;
+    rdfs:range xsd:string ;
+    rdfs:comment "The entity key mentioned by a claim; the claim node is not identified with this entity."@en .
+
+p1:attribute a owl:DatatypeProperty ;
+    rdfs:domain p1:Claim ;
+    rdfs:range xsd:string .
+
+p1:value a owl:DatatypeProperty ;
+    rdfs:domain p1:Claim ;
+    rdfs:range xsd:string ;
+    rdfs:comment "The claimed value, matching SearchOS evidence text. Different values are not automatically contradictory: entity, scope, time and attribute semantics must first be checked."@en .
+
+p1:scopeKey a owl:DatatypeProperty ;
+    rdfs:domain [ a owl:Class ; owl:unionOf (
+        p1:Claim p1:DerivedArtifact p1:RevisionEvent p1:EvidenceUse
+    ) ] ;
+    rdfs:range xsd:string .
+
+p1:sourceReference a owl:DatatypeProperty ;
+    rdfs:domain p1:SourceObservation ; rdfs:range xsd:string .
+
+p1:sourceExcerpt a owl:DatatypeProperty ;
+    rdfs:domain p1:Claim ; rdfs:range xsd:string .
+
+p1:source a owl:ObjectProperty ;
+    rdfs:domain p1:Claim ;
+    rdfs:range p1:SourceObservation ;
+    rdfs:subPropertyOf prov:wasDerivedFrom .
+
+p1:validDuring a owl:ObjectProperty ;
+    rdfs:domain p1:Claim ;
+    rdfs:range time:ProperInterval ;
+    rdfs:comment "The period for which the source asserts the claim, distinct from publication or observation time. Calendar dates use the closed-day convention documented on startDate and endDate."@en .
+
+p1:startDate a owl:DatatypeProperty ;
+    rdfs:domain time:ProperInterval ;
+    rdfs:range xsd:date ;
+    rdfs:comment "Custom prototype convention: the first included calendar day in a closed date interval, written YYYY-MM-DD without a timezone. This is not an OWL-Time Instant or hasBeginning value. An absent date is unknown; coarse or relative dates require separate normalization before this representation is used."@en .
+
+p1:endDate a owl:DatatypeProperty ;
+    rdfs:domain time:ProperInterval ;
+    rdfs:range xsd:date ;
+    rdfs:comment "Custom prototype convention: the last included calendar day. Equal startDate and endDate denote one whole calendar day, not a zero-duration instant. Shared boundary dates overlap. An absent date is unknown, not an inferred unbounded endpoint; Python validation rejects reversed dates."@en .
+
+p1:usedEvidence a owl:ObjectProperty ;
+    rdfs:domain p1:Execution ;
+    rdfs:range p1:Claim ;
+    rdfs:subPropertyOf prov:used .
+
+p1:usedArtifact a owl:ObjectProperty ;
+    rdfs:domain p1:Execution ;
+    rdfs:range p1:DerivedArtifact ;
+    rdfs:subPropertyOf prov:used .
+
+p1:supportedBy a owl:ObjectProperty ;
+    rdfs:domain p1:DerivedArtifact ;
+    rdfs:range p1:Claim ;
+    rdfs:subPropertyOf prov:wasDerivedFrom ;
+    rdfs:comment "Evidence support for an artifact. A withdrawn support triggers revalidation; another support may still sustain the artifact."@en .
+
+p1:status a owl:DatatypeProperty ;
+    rdfs:domain [ a owl:Class ; owl:unionOf (
+        p1:Claim p1:DerivedArtifact p1:Execution p1:RevisionEvent p1:EvidenceUse
+    ) ] ;
+    rdfs:range xsd:string ;
+    rdfs:comment "Application lifecycle state, interpreted for the subject's class. In particular, superseded is not equivalent to false. This property does not impose a shared status enumeration across different classes."@en .
+
+p1:executionEpoch a owl:DatatypeProperty ;
+    rdfs:domain p1:Execution ;
+    rdfs:range xsd:nonNegativeInteger .
+
+p1:revisionReason a owl:DatatypeProperty ;
+    rdfs:domain p1:RevisionEvent ;
+    rdfs:range xsd:string .
+
+p1:SupportSet a owl:Class ;
+    rdfs:comment "Application convention: evidence members within one set are jointly required; multiple alternatives are disjunctive. Python maintains these supports; OWL does not assign truth from the grouping."@en .
+p1:supportAlternative a owl:ObjectProperty ;
+    rdfs:domain p1:DerivedArtifact ; rdfs:range p1:SupportSet .
+p1:memberEvidence a owl:ObjectProperty ;
+    rdfs:domain p1:SupportSet ; rdfs:range p1:Claim .
+p1:EvidenceUse a owl:Class ;
+    rdfs:comment "Scoped use of a claim. Retiring this use does not erase the claim or declare historical facts false."@en .
+p1:usedClaim a owl:ObjectProperty ;
+    rdfs:domain p1:EvidenceUse ; rdfs:range p1:Claim .
+p1:oldEvidence a owl:ObjectProperty ;
+    rdfs:domain p1:RevisionEvent ; rdfs:range p1:Claim .
+p1:newEvidence a owl:ObjectProperty ;
+    rdfs:domain p1:RevisionEvent ; rdfs:range p1:Claim .

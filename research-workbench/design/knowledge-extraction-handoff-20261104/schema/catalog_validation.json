@@ -1,0 +1,153 @@
+{
+  "schema_version": "anduril_knowledge_fields_v1_20261104",
+  "counts": {
+    "product": 268,
+    "technology": 140,
+    "total_fields": 408,
+    "source_rows": 430,
+    "source_product_rows": 290,
+    "source_technology_rows": 140,
+    "specific_functions": 91,
+    "groups": 39
+  },
+  "unmapped_rows": 0,
+  "duplicate_field_ids": 0,
+  "distinct_duplicate_labels": "其他功能按11组分别保留；场景部署方式与软件部署方式分别保留。",
+  "shared_fields": [
+    {
+      "field_id": "product_unattended_duration",
+      "label": "无人值守时长",
+      "groups": [
+        "scenarios",
+        "ground_station"
+      ]
+    },
+    {
+      "field_id": "product_length",
+      "label": "长度",
+      "groups": [
+        "hardware",
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_width",
+      "label": "宽度",
+      "groups": [
+        "hardware",
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_height",
+      "label": "高度",
+      "groups": [
+        "hardware",
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_endurance",
+      "label": "续航时长",
+      "groups": [
+        "hardware",
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_range",
+      "label": "航程",
+      "groups": [
+        "hardware",
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_power_sources",
+      "label": "供电方式",
+      "groups": [
+        "hardware",
+        "ground_station"
+      ]
+    },
+    {
+      "field_id": "product_recovery_methods",
+      "label": "回收方式",
+      "groups": [
+        "air_platform",
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_reusable",
+      "label": "是否可重复使用",
+      "groups": [
+        "air_platform",
+        "effectors"
+      ]
+    },
+    {
+      "field_id": "product_marine_platform_type",
+      "label": "平台类别",
+      "groups": [
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_displacement",
+      "label": "排水量",
+      "groups": [
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_max_marine_speed",
+      "label": "最大航速",
+      "groups": [
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_supports_underwater_acoustic_communication",
+      "label": "水声通信",
+      "groups": [
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_launch_methods",
+      "label": "布放方式",
+      "groups": [
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_sea_state_rating",
+      "label": "耐海况",
+      "groups": [
+        "surface_platform",
+        "underwater_platform"
+      ]
+    },
+    {
+      "field_id": "product_operation_modes",
+      "label": "作业模式",
+      "groups": [
+        "surface_platform",
+        "underwater_platform"
+      ]
+    }
+  ],
+  "count_note": "HTML原统计406项不作为强制目标。430行经语义处理为408字段：产品268、技术140。22行是跨形态复用的同一字段。"
+}

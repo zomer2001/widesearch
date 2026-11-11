@@ -1,0 +1,602 @@
+"""Scheduler — drain Frontier OPEN tasks into running sub-agents.
+
+Replaces the old Broker. Reads `settings.max_parallel_agents` and
+honors task `priority` / `blocked_by`. Caps:
+- global: max_parallel_agents across ALL kinds — search, explore, writer,
+  and continuations each occupy one slot
+- writer: additionally singleton (enforced via maybe_spawn_writer)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+def _running_count() -> int:
+    """Live (not-done) entries in the session task pool — the number the
+    ``max_parallel_agents`` cap is enforced against. Counts every agent
+    kind: search, explore, writer, and continuations all occupy a slot."""
+    from searchos.agents.orchestrator.lifecycle import _ctx
+    return sum(1 for t in _ctx.task_pool.values() if not t.done())
+
+
+def _p1_ready(state: Any, task: Any) -> bool:
+    from searchos.socm.revisions import artifact_usable
+
+    return all(artifact_usable(state, aid) for aid in task.p1_requires_artifacts)
+
+
+def retire_stale_worker(workspace: Any, task_id: str, agent_id: str, run_id: str) -> bool:
+    """Release only the still-owned stale attempt; a revision's new queue wins."""
+    from searchos.socm import FrontierTaskStatus
+    from searchos.socm.revisions import StaleExecutionError, assert_execution_current
+
+    retired = False
+
+    def update(state):
+        nonlocal retired
+        task = next((q for q in state.frontier.questions if q.id == task_id), None)
+        if (not run_id or task is None or task.status != FrontierTaskStatus.RUNNING
+                or task.assigned_agent_id != agent_id):
+            return state
+        try:
+            assert_execution_current(state, run_id)
+        except StaleExecutionError:
+            import time
+
+            execution = state.p1.executions.get(run_id)
+            if execution is not None:
+                execution.invalidated = True
+            task.status = FrontierTaskStatus.CANCELLED
+            task.assigned_agent_id = ""
+            task.resolution = (
+                "stale_execution_review_required: consumed evidence or execution state changed; "
+                "retain current facts and start a fresh task graph for remaining gaps."
+            )
+            task.last_agent_report_excerpt = "[superseded] stale result was not published"
+            task.updated_at = time.time()
+            retired = True
+        return state
+
+    workspace.atomic_update_state(update)
+    return retired
+
+
+class Scheduler:
+    """Per-session scheduler. WriterTriggerSensor lives here so coverage
+    stages don't re-fire across ticks.
+    """
+
+    def __init__(self, task_allowlist: set[str] | None = None) -> None:
+        from searchos.harness.middleware.sensor.core.writer_trigger_sensor import (
+            WriterTriggerSensor,
+        )
+        self._writer_sensor = WriterTriggerSensor()
+        # Targeted repair runs may dispatch only the explicitly queued repair
+        # tasks. None keeps the normal unrestricted scheduler behavior.
+        self._task_allowlist = set(task_allowlist) if task_allowlist is not None else None
+        # Serializes tick() chains. Two concurrent ticks (parallel tool
+        # calls in one orchestrator turn) each read `running` before the
+        # other registers its spawns — both see free slots and the pool
+        # oversells past max_parallel_agents.
+        self._tick_lock = asyncio.Lock()
+
+    def allow_tasks(self, task_ids: list[str] | set[str]) -> None:
+        """Extend a targeted run's dynamic task allowlist.
+
+        Normal sessions use ``None`` and remain unrestricted. Repair sessions
+        start with an empty set; only tasks accepted from the scope-checked
+        ``enqueue_tasks`` call are admitted here.
+        """
+        if self._task_allowlist is not None:
+            self._task_allowlist.update(task_ids)
+
+    # ---- automatic side-work (unchanged from old Broker) ----
+
+    async def drop_blocked_cycles(self) -> dict[str, Any]:
+        """Detect blocked_by cycles among BLOCKED tasks; drop the whole cycle."""
+        from searchos.agents.orchestrator.lifecycle import _ctx
+        from searchos.socm import FrontierTaskStatus
+
+        state = _ctx.workspace.load_state()
+        blocked = {q.id: q for q in state.frontier.questions
+                   if q.status == FrontierTaskStatus.BLOCKED}
+        if not blocked:
+            return {"cycles": 0, "dropped": 0}
+
+        graph = {qid: [d for d in q.blocked_by if d in blocked]
+                 for qid, q in blocked.items()}
+        in_cycle: set[str] = set()
+        for start in graph:
+            if start in in_cycle:
+                continue
+            path: list[str] = [start]
+            on_path = {start}
+            iter_stack: list[tuple[str, iter]] = [(start, iter(graph[start]))]
+            visited: set[str] = set()
+            while iter_stack:
+                _, it = iter_stack[-1]
+                try:
+                    nxt = next(it)
+                except StopIteration:
+                    iter_stack.pop()
+                    on_path.discard(path.pop())
+                    continue
+                if nxt in on_path:
+                    idx = path.index(nxt)
+                    in_cycle.update(path[idx:])
+                    continue
+                if nxt in visited:
+                    continue
+                visited.add(nxt)
+                path.append(nxt)
+                on_path.add(nxt)
+                iter_stack.append((nxt, iter(graph.get(nxt, []))))
+
+        if not in_cycle:
+            return {"cycles": 0, "dropped": 0}
+
+        import time as _time
+
+        def _apply(s: Any) -> Any:
+            ids = set(in_cycle)
+            now = _time.time()
+            for q in s.frontier.questions:
+                if q.id in ids and q.status == FrontierTaskStatus.BLOCKED:
+                    q.status = FrontierTaskStatus.CANCELLED
+                    q.last_agent_report_excerpt = "[dropped] blocked_by cycle"
+                    q.updated_at = now
+            return s
+        _ctx.workspace.atomic_update_state(_apply)
+        return {"cycles": 1, "dropped": len(in_cycle), "ids": sorted(in_cycle)}
+
+    async def unblock_ready_tasks(self) -> dict[str, Any]:
+        """BLOCKED → OPEN once all blocked_by deps are terminal."""
+        from searchos.agents.orchestrator.lifecycle import _ctx
+        from searchos.socm import FrontierTaskStatus
+
+        state = _ctx.workspace.load_state()
+        terminal = {
+            q.id for q in state.frontier.questions
+            if q.status in (FrontierTaskStatus.COMPLETED, FrontierTaskStatus.CANCELLED)
+        }
+        to_unblock = [
+            q.id for q in state.frontier.questions
+            if q.status == FrontierTaskStatus.BLOCKED
+            and (not q.blocked_by or all(d in terminal for d in q.blocked_by))
+            and _p1_ready(state, q)
+        ]
+        if not to_unblock:
+            return {"unblocked": 0}
+
+        import time as _time
+
+        def _apply(s: Any) -> Any:
+            ids = set(to_unblock)
+            now = _time.time()
+            for q in s.frontier.questions:
+                if q.id in ids and q.status == FrontierTaskStatus.BLOCKED:
+                    q.status = FrontierTaskStatus.PENDING
+                    q.updated_at = now
+            return s
+        _ctx.workspace.atomic_update_state(_apply)
+        return {"unblocked": len(to_unblock)}
+
+    async def detect_evidence_conflicts(self) -> dict[str, Any]:
+        """增量核验待处理证据；只报告当前有效的冲突。"""
+        from searchos.agents.orchestrator.lifecycle import _ctx
+        from searchos.harness.middleware.extraction.core.conflicts import ConflictReviewer
+        from searchos.harness.middleware.extraction.core.judge import RowExtractor
+        from searchos.harness.middleware.extraction.core.models import ExtractionConfig
+        from searchos.harness.middleware.extraction.core.store import WorkspaceEvidenceStore
+        from searchos.socm.conflicts import reconcile_conflicts
+        from searchos.socm.coverage import evidence_source_allowed
+
+        state = _ctx.workspace.load_state()
+        model = getattr(_ctx, "extraction_model", None) or getattr(_ctx, "judge_model", None)
+        if model is not None:
+            extractor = RowExtractor(model, ExtractionConfig())
+            await ConflictReviewer(
+                WorkspaceEvidenceStore(_ctx.workspace), extractor.invoke,
+                p1_enabled=state.coverage_map.p1_enabled,
+            ).review(set(state.coverage_map.cells), max_pairs=12)
+            state = _ctx.workspace.load_state()
+        reconcile_conflicts(state, set(state.coverage_map.cells))
+        conflicts: dict[tuple, tuple[str, str]] = {}
+
+        for cell_key, cell in state.coverage_map.cells.items():
+            if not cell.has_conflict:
+                continue
+            ev_ids = list(cell.conflict_evidence_ids or [])
+            if not ev_ids and cell.has_conflict:
+                ev_ids = list(cell.supporting_evidence_ids)
+            if len(ev_ids) >= 2:
+                sig = (cell_key, *sorted(ev_ids))
+                conflicts.setdefault(
+                    sig,
+                    (cell_key, f"CoverageCell {cell_key!r} flagged conflicting values"),
+                )
+        for a, b in state.evidence_graph.get_conflicts():
+            if not all(evidence_source_allowed(state, node) for node in (a, b)):
+                continue
+            # 表格冲突已按单元格投影计数；独立事实的显式关系单独计数。
+            if a.entity or a.attribute or b.entity or b.attribute:
+                continue
+            if any(
+                a.id in c.supporting_evidence_ids and b.id in c.supporting_evidence_ids
+                for c in state.coverage_map.cells.values()
+            ):
+                continue
+            sig = tuple(sorted((a.id, b.id)))
+            cell_key = f"{a.entity}.{a.attribute}" if (a.entity and a.attribute) else ""
+            conflicts.setdefault(
+                sig,
+                (cell_key, f"Evidence edge CONFLICT between {a.id} and {b.id}"),
+            )
+        return {"detected": len(conflicts), "enqueued": 0}
+
+    async def maybe_spawn_writer(self) -> dict[str, Any]:
+        """Spawn singleton writer based on WriterTriggerSensor."""
+        import uuid
+
+        from searchos.agents.orchestrator.lifecycle import (
+            _ctx,
+            _find_writer_id,
+            _set_writer_last_evidence_count,
+            _spawn_sub_agent,
+        )
+        from searchos.config.settings import settings as _settings
+        from searchos.socm import FrontierTask, FrontierTaskStatus
+
+        if not _settings.enable_writer_agent:
+            return {"action": "disabled"}
+        state = _ctx.workspace.load_state()
+        active_repairs = [q for q in state.frontier.questions
+                          if q.kind == "write" and q.p1_repair_revision
+                          and q.status in {FrontierTaskStatus.PENDING, FrontierTaskStatus.BLOCKED,
+                                           FrontierTaskStatus.RUNNING}
+                          and (self._task_allowlist is None or q.id in self._task_allowlist)]
+        repair_writers = [q for q in active_repairs
+                          if q.kind == "write" and q.p1_repair_revision
+                          and q.status == FrontierTaskStatus.PENDING and _p1_ready(state, q)
+                          and (self._task_allowlist is None or q.id in self._task_allowlist)]
+        if repair_writers:
+            if _running_count() >= _settings.max_parallel_agents:
+                return {"action": "deferred_pool_full"}
+            existing = _find_writer_id()
+            if existing and existing in _ctx.task_pool and not _ctx.task_pool[existing].done():
+                return {"action": "writer_busy"}
+            repair = sorted(repair_writers, key=lambda q: (-q.priority, q.created_at))[0]
+            # A new execution graph has no stale conversation/checkpoint state.
+            writer_id = await _spawn_sub_agent(
+                "writer_agent", repair.task_prompt or repair.question, list(repair.skills),
+                bind_task_id=repair.id,
+            )
+            return {"action": "spawned", "writer_id": writer_id,
+                    "write_task_id": repair.id, "p1_repair": True}
+        if active_repairs:
+            return {"action": "deferred_repair_dependencies"}
+        if self._task_allowlist is not None:
+            return {"action": "disabled_targeted_repair"}
+        if _find_writer_id() is not None:
+            return {"action": "already_spawned"}
+        # 先检查容量：evaluate() 会消费一次性触发信号。
+        running = _running_count()
+        if running >= _settings.max_parallel_agents:
+            return {"action": "deferred_pool_full", "running": running}
+
+        state = _ctx.workspace.load_state()
+        signal = self._writer_sensor.evaluate(state)
+        if not signal.fire:
+            return {"action": "too_early", **signal.as_dict()}
+
+        intent = state.intent or "Draft an answer to the user's query."
+        cov, filled, total = signal.coverage, signal.filled_cells, signal.total_cells
+        trigger = signal.trigger
+        task = (
+            f"You are the writer. The original query is:\n\n{intent}\n\n"
+            f"Coverage crossed {trigger.removeprefix('coverage_stage_')}% "
+            f"({filled}/{total} cells). Continue drafting via write_section."
+        )
+
+        write_task_id = f"w_{uuid.uuid4().hex[:8]}"
+
+        def _enqueue(s: Any) -> Any:
+            s.frontier.add(FrontierTask(
+                id=write_task_id,
+                question=f"Draft answer. trigger={trigger} cov={cov:.0%} {filled}/{total}",
+                kind="write",
+                status=FrontierTaskStatus.RUNNING,
+                priority=0.8,
+                agent_type="writer_agent",
+                created_by="sensor",
+            ))
+            return s
+        _ctx.workspace.atomic_update_state(_enqueue)
+
+        task_with_id = f"{task}\n\nWrite task id: {write_task_id}"
+        writer_id = await _spawn_sub_agent(
+            "writer_agent", task_with_id, [], bind_task_id=write_task_id,
+        )
+        _set_writer_last_evidence_count(writer_id, state.evidence_graph.node_count)
+        info = _ctx.agent_graphs.get(writer_id)
+        if info is not None:
+            info["write_task_id"] = write_task_id
+        return {
+            "action": "spawned",
+            "writer_id": writer_id,
+            "write_task_id": write_task_id,
+            **signal.as_dict(),
+        }
+
+    async def maybe_continue_writer(self) -> dict[str, Any]:
+        """Wake the writer when ≥WRITER_CONTINUE_EVIDENCE_DELTA new nodes since last turn."""
+        import asyncio
+
+        from searchos.agents.orchestrator.lifecycle import (
+            WRITER_CONTINUE_EVIDENCE_DELTA,
+            _continue_sub_agent_run,
+            _ctx,
+            _find_writer_id,
+            _set_writer_last_evidence_count,
+            _writer_last_evidence_count_var,
+        )
+
+        writer_id = _find_writer_id()
+        if writer_id is None:
+            return {"action": "no_writer"}
+        if writer_id in _ctx.task_pool and not _ctx.task_pool[writer_id].done():
+            return {"action": "writer_busy"}
+        # 续写也占容量；延后不会消费新证据计数。
+        from searchos.config.settings import settings as _settings
+        running = _running_count()
+        if running >= _settings.max_parallel_agents:
+            return {"action": "deferred_pool_full", "running": running}
+
+        state = _ctx.workspace.load_state()
+        current_count = state.evidence_graph.node_count
+        last_seen = _writer_last_evidence_count_var(writer_id)
+        delta = current_count - last_seen
+        if delta < WRITER_CONTINUE_EVIDENCE_DELTA:
+            return {"action": "below_threshold", "delta": delta}
+
+        new_nodes = state.evidence_graph.nodes[last_seen:]
+        from searchos.socm.coverage import answer_evidence
+
+        usable_ids = {node.id for node in answer_evidence(state)}
+        new_nodes = [node for node in new_nodes if node.id in usable_ids]
+        bullets = []
+        for n in new_nodes[-10:]:
+            slot = f"[{n.entity}.{n.attribute}] " if (n.entity or n.attribute) else ""
+            bullets.append(f"- {slot}{n.claim} (src={n.source})")
+        follow_up = (
+            f"{delta} new evidence nodes since last turn:\n"
+            + "\n".join(bullets)
+            + "\n\nProceed with write_section / edit_section + new citations."
+        )
+        _ctx.completed.pop(writer_id, None)
+        _ctx.task_pool.pop(writer_id, None)
+        if writer_id in _ctx.agent_graphs:
+            _ctx.agent_graphs[writer_id]["p1_pending_evidence_ids"] = [
+                node.id for node in new_nodes[-10:]
+            ]
+        _ctx.task_pool[writer_id] = asyncio.create_task(
+            _continue_sub_agent_run(writer_id, f"[FOLLOW_UP_TASK]\n{follow_up}"),
+            name=f"continue:{writer_id}",
+        )
+        _set_writer_last_evidence_count(writer_id, current_count)
+        return {"action": "continued", "writer_id": writer_id, "delta": delta}
+
+    # ---- new unified dispatch entry ----
+
+    async def drain_ready_tasks(self) -> dict[str, Any]:
+        """Spawn sub-agents for OPEN Frontier tasks up to max_parallel_agents.
+
+        Order: (-priority, created_at). Skips blocked_by-pending tasks.
+        Writer is singleton and handled separately by maybe_spawn_writer.
+        """
+        from searchos.agents.orchestrator.lifecycle import (
+            _ctx,
+            _default_agent_for_kind,
+            _spawn_sub_agent,
+        )
+        from searchos.config.settings import settings
+        from searchos.socm import FrontierTaskStatus
+
+        if not settings.enable_scheduler:
+            return {"spawned": 0, "reason": "disabled"}
+
+        # Budget exhausted: don't start new work — let running agents drain.
+        if _ctx.budget_exhausted:
+            return {"spawned": 0, "reason": "budget_exhausted_draining"}
+
+        running = sum(1 for t in _ctx.task_pool.values() if not t.done())
+        global_slots = max(0, settings.max_parallel_agents - running)
+        if global_slots <= 0:
+            return {"spawned": 0, "running": running, "reason": "saturated"}
+
+        import time as _now_time
+        now = _now_time.time()
+        state = _ctx.workspace.load_state()
+        terminal = {
+            q.id for q in state.frontier.questions
+            if q.status in (FrontierTaskStatus.COMPLETED, FrontierTaskStatus.CANCELLED)
+        }
+        ready = [
+            q for q in state.frontier.questions
+            if q.status == FrontierTaskStatus.PENDING
+            and q.kind != "write"  # writer singleton handled separately
+            and (self._task_allowlist is None or q.id in self._task_allowlist)
+            and (not q.blocked_by or all(d in terminal for d in q.blocked_by))
+            and _p1_ready(state, q)
+        ]
+        # Rate-limit cooldown: tasks recycled off a 429 carry not_before —
+        # leave them queued until it passes.
+        cooling = sum(1 for q in ready if (q.not_before or 0.0) > now)
+        ready = [q for q in ready if (q.not_before or 0.0) <= now]
+        if not ready:
+            out: dict[str, Any] = {"spawned": 0, "running": running, "reason": "empty"}
+            if cooling:
+                out["reason"] = "cooling"
+                out["cooling"] = cooling
+            return out
+
+        ready.sort(key=lambda q: (-q.priority, q.created_at))
+
+        # Dispatch-time revalidation: a task that was legitimate at
+        # enqueue time may have had its rows filled by peers while it
+        # sat queued. Spawning it burns an agent run that exits on
+        # arrival. Resolve such tasks instead of dispatching.
+        from searchos.agents.orchestrator.lifecycle import _task_redundancy_reason
+        from searchos.socm import FrontierTaskStatus as _Q
+        stale: list[tuple[str, str]] = []
+        live: list[Any] = []
+        for task in ready:
+            if task.kind != "search":
+                live.append(task)
+                continue
+            reason = _task_redundancy_reason(
+                state,
+                target_cells=list(task.target_cells or []),
+                table_id=task.table_id or "",
+                p1_repair_revision=task.p1_repair_revision,
+            )
+            if reason:
+                stale.append((task.id, reason))
+            else:
+                live.append(task)
+        if stale:
+            import time as _time
+
+            def _resolve_stale(s: Any) -> Any:
+                by_id = dict(stale)
+                now = _time.time()
+                for q in s.frontier.questions:
+                    if q.id in by_id and q.status == _Q.PENDING:
+                        q.status = _Q.COMPLETED
+                        q.resolution = f"skipped at dispatch: {by_id[q.id]}"
+                        q.updated_at = now
+                return s
+            _ctx.workspace.atomic_update_state(_resolve_stale)
+            logger.info("drain: resolved %d stale task(s) without dispatch: %s",
+                        len(stale), [t for t, _ in stale])
+        ready = live
+        from searchos.collection_policy.adapter import rank_ready_tasks
+        ready = rank_ready_tasks(_ctx.workspace, ready)
+
+        spawned: list[dict[str, str]] = []
+        by_kind: dict[str, int] = {}
+        for task in ready:
+            # Recount before EVERY spawn: _spawn_sub_agent awaits a lot
+            # before registering into task_pool, and other paths
+            # (writer continue) can add entries meanwhile.
+            # The stale `global_slots` computed above is an upper bound,
+            # not the live truth.
+            if _running_count() >= settings.max_parallel_agents:
+                break
+            # Stagger spawns within one tick so a full drain doesn't fire
+            # every sub-agent's first LLM request in the same instant
+            # (provider concurrency 429s killed whole batches on arrival).
+            if spawned and settings.spawn_stagger_s > 0:
+                await asyncio.sleep(settings.spawn_stagger_s)
+            agent_type = task.agent_type or _default_agent_for_kind(task.kind, state.source_scope)
+            prompt = task.task_prompt or task.question
+            if task.target_cells and agent_type in {
+                "search_agent", "local_search_agent",
+            }:
+                prompt = f"{prompt}\n\nTarget cells: {', '.join(task.target_cells)}"
+            aid = await _spawn_sub_agent(
+                agent_type, prompt, list(task.skills or []),
+                bind_task_id=task.id,
+                target_table=task.table_id,
+                search_budget=task.max_searches,
+            )
+            spawned.append({"agent_id": aid, "agent_type": agent_type, "task_id": task.id})
+            by_kind[task.kind] = by_kind.get(task.kind, 0) + 1
+
+        out: dict[str, Any] = {
+            "spawned": len(spawned),
+            "by_kind": by_kind,
+            "agents": spawned,
+            "running_before": running,
+            "remaining_ready": max(0, len(ready) - len(spawned)),
+        }
+        if cooling:
+            out["cooling"] = cooling
+        if stale:
+            out["skipped_stale"] = [
+                {"task_id": tid, "reason": reason} for tid, reason in stale
+            ]
+        return out
+
+    async def reap_zombie_tasks(self) -> dict[str, Any]:
+        """RUNNING 任务的 agent 已死且未走报告路径 → 回收。否则任务永久占住
+        RUNNING，同 target 的重派会被 _find_duplicate 当重复拒绝。"""
+        import time as _time
+
+        from searchos.agents.orchestrator.lifecycle import (
+            _ctx,
+            _recycle_failed_task,
+        )
+        from searchos.socm import FrontierTaskStatus
+        from searchos.socm.revisions import StaleExecutionError
+
+        state = _ctx.workspace.load_state()
+        now = _time.time()
+        reaped: list[str] = []
+        for q in state.frontier.questions:
+            if q.status != FrontierTaskStatus.RUNNING or not q.assigned_agent_id:
+                continue
+            if now - (q.updated_at or 0.0) < 60:
+                continue  # 太新——可能刚派发或正在收尾
+            aid = q.assigned_agent_id
+            task = (_ctx.task_pool or {}).get(aid)
+            alive = task is not None and not task.done()
+            if alive or aid in (_ctx.completed or {}):
+                continue  # completed 的由报告路径处理
+            try:
+                _recycle_failed_task(q.id, aid, "zombie",
+                                     "agent task vanished without report")
+            except StaleExecutionError:
+                info = (_ctx.agent_graphs or {}).get(aid, {})
+                retire_stale_worker(_ctx.workspace, q.id, aid, info.get("p1_run_id", ""))
+            reaped.append(q.id)
+        return {"reaped": len(reaped), "ids": reaped}
+
+    async def tick(self) -> dict[str, Any]:
+        async with self._tick_lock:
+            targeted = self._task_allowlist is not None
+            repair_writer = False
+            if targeted:
+                from searchos.agents.orchestrator.lifecycle import _ctx
+
+                workspace = getattr(_ctx, "workspace", None)
+                if workspace is not None:
+                    state = workspace.load_state()
+                    repair_writer = bool(getattr(getattr(state, "p1", None), "enabled", False)) and any(
+                        task.kind == "write" and task.p1_repair_revision
+                        and task.id in self._task_allowlist
+                        for task in state.frontier.questions
+                    )
+            return {
+                "drop_blocked_cycles": await self.drop_blocked_cycles(),
+                "unblock_ready_tasks": await self.unblock_ready_tasks(),
+                "reap_zombie_tasks": await self.reap_zombie_tasks(),
+                "detect_evidence_conflicts": (
+                    {"action": "disabled_targeted_repair"}
+                    if targeted else await self.detect_evidence_conflicts()
+                ),
+                "maybe_spawn_writer": (
+                    {"action": "disabled_targeted_repair"}
+                    if targeted and not repair_writer else await self.maybe_spawn_writer()
+                ),
+                "maybe_continue_writer": (
+                    {"action": "disabled_targeted_repair"}
+                    if targeted else await self.maybe_continue_writer()
+                ),
+                "drain_ready_tasks": await self.drain_ready_tasks(),
+            }

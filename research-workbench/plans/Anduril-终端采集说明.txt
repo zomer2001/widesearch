@@ -1,0 +1,65 @@
+Anduril 产品谱系、技术路线、成熟度与独立开源复现单元
+
+在 research-workbench 目录打开终端。资料研究台需正在运行，OpenAI设置使用已配置的gpt-4o。
+
+运行全部采集并构建知识库：
+caffeinate -i .venv/bin/python scripts/collect_anduril.py --run --build-knowledge
+
+中断后继续，复用任务session，不重复提交已完成研究：
+caffeinate -i .venv/bin/python scripts/collect_anduril.py --resume --build-knowledge
+
+只看计划，不发请求：
+.venv/bin/python scripts/collect_anduril.py
+
+只看进度：
+.venv/bin/python scripts/collect_anduril.py --status
+
+研究完成后单独重新整理已有知识产物（不会重新调用研究模型）：
+.venv/bin/python scripts/anduril_knowledge.py
+
+可选：明确重跑未成功批次（会新增模型用量，旧尝试仍保留）：
+caffeinate -i .venv/bin/python scripts/collect_anduril.py --resume --retry-failed --build-knowledge
+
+采集范围
+01 产品总谱系、系列/型号/版本、继承和替代关系。
+02 Lattice及共用软件的数据融合、自主与集成架构。
+03 传感产品、子系统、参数与测量条件。
+04 边缘计算、通信、消息与系统互联。
+05 公开射频与电子系统的技术架构和验证证据。
+06 小型航空平台的系列、公开技术及版本差异。
+07 其他航空系列的架构、参数与试验节点。
+08 海事产品、导航、感知、通信与能源路线。
+09 制造支撑、数字线程、模块化与质量追溯。
+10 跨产品技术路线及成熟度证据审计。
+11 外部开源软件、数据处理与分布式参考单元。
+12 外部机器人、定位、仿真与测试参考单元。
+13 产品—技术—路线—成熟度—复现单元覆盖检查与定向补缺。
+
+时间和用量
+预设13批，第一批采集预算10分钟，其他每批15分钟，共190分钟，另有收尾和归档时间。
+通过 --max-time 1200 等参数可覆盖尚未开始批次的秒数。
+每次只启动一批，使用GPT-4o额度；不要在同一服务同时启动其他研究。
+Mac的caffeinate仅防止这条命令运行期间因空闲休眠，结束后自动退出。
+Ctrl+C停止本地驱动，已经提交的研究在后台保留；使用--resume接回。
+提交响应不确定时会停止，避免超时后自动重复付费；请先核对网页历史中的任务。
+
+产物位置
+默认 data/collections/anduril-products-technology/。
+每批 payload.json / result.json / report.md，另有 checkpoint.json、manifest.json、summary.md。
+知识产物 knowledge.sqlite、knowledge.jsonl、knowledge-summary.md、knowledge-manifest.json。
+manifest/validation.json 记录缺失类别、缺口、冲突与候选记录。
+SQLite有products、product_relations、technologies、technology_routes、maturity_assessments、reproduction_units、evidence视图；旧版本保留，active=1为当前输入。
+
+网页资料库
+真实抓取正文自动进入“研究网页资料”。
+批次报告、技术总表和结构化记录另存“Anduril · 产品与技术路线”，均可在网页资料库查看、下载和删除。
+报告入库只做本地解析，不额外调用模型做Recap；解析未完成仍保留文件副本。
+删除后的同一产物不会在恢复运行时自动重建，原任务归档单独保留。
+
+证据与复现状态
+技术参数必须有型号、单位、测量类型、条件和出处；未知项保留为空。
+技术路线的明确采用、机制相似和分析推断分开记录。
+成熟度按产品/组件/路线/开源项目分别判断，来源原文与推断分开，缺乏依据不填TRL。
+开源单元独立查GitHub元数据，记录固定commit、许可证、代码路径、依赖、输入输出、步骤和验收标准。
+脚本不会执行外部项目代码，execution_status统一not_run；仓库可访问不等于已复现，也不等于Anduril采用该项目。
+任一必需类别缺失、引用不完整、成熟度属推断或仓库核对失败会保留候选/partial状态；不能将运行结束当作事实全部核验完成。

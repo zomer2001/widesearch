@@ -1,0 +1,1850 @@
+"""Orchestrator sub-agent lifecycle (paper §Agent Roles).
+
+Spawn → run → collect machinery for the orchestrator's sub-agents, plus the
+prompt / scope / report helpers it needs. The @tool surface lives in
+``searchos.tools.tasks`` (queue) and ``searchos.tools.schema``
+(schema); this module holds the spawn lifecycle those tools and the Scheduler
+drive. ``_ctx`` and friends are re-exported from ``searchos.agents.runtime`` so
+the Scheduler / task tools import everything from one place.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import re
+from typing import Any
+
+from searchos.agents import (
+    explore as _explore,
+)
+from searchos.agents import (
+    local_search as _local_search,
+)
+from searchos.agents import (
+    search as _search,
+)
+from searchos.agents import (
+    writer as _writer,
+)
+from searchos.agents.orchestrator.post_mortem import (
+    build_failure_memory_prompt as _build_failure_memory_prompt,
+)
+from searchos.agents.orchestrator.post_mortem import (
+    run_post_mortem as _run_post_mortem,
+)
+from searchos.agents.runtime import (
+    _ctx,  # noqa: F401 — re-exported (scheduler / skill_catalog import _ctx from here)
+    _post_mortem_count_var,
+    _post_mortem_tasks_var,
+    _sub_agent_counter_var,
+)
+from searchos.config.run_config import current_run_config
+from searchos.harness.p1_runtime import (
+    begin_run,
+    continue_run,
+    current_run_id,
+    execution_context,
+    record_snapshot,
+)
+from searchos.socm.revisions import StaleExecutionError
+
+logger = logging.getLogger(__name__)
+
+# Role packages own their own ``get_tools`` / ``agent.md`` (paper §Agent Roles).
+_ROLE_REGISTRY = {
+    _explore.AGENT_TYPE: _explore,
+    _local_search.AGENT_TYPE: _local_search,
+    _search.AGENT_TYPE: _search,
+    _writer.AGENT_TYPE: _writer,
+}
+
+_SCOPE_AUDIT_NOTE = (
+    "Before ending, audit the ROW SET against the task's expected scope: "
+    "enumerate the dimensions the query implies (years, regions, categories, "
+    "top-N, ...) and check every combination has rows. Fill rates count only "
+    "rows already in the schema — all-filled does NOT mean the scope is "
+    "covered. If rows are missing, add_entities + enqueue_tasks for the "
+    "gaps; end your turn only when the audit passes or further search "
+    "cannot help."
+)
+WRITER_CONTINUE_EVIDENCE_DELTA = 3
+MAX_SKILLS_PER_DISPATCH = 5
+_OUTLINE_MIN_SECTIONS = 3
+_OUTLINE_CONTENT_RATIO = 0.6
+_ANTIPATTERN_DECAY_S = 1800  # 30 min — patterns older than this drop from prompt
+_ANTIPATTERN_BLOCK_THRESHOLD = 2  # 2+ = "proven invalid, avoid"
+_EXPLORE_PAGE_URL_HDR = re.compile(r"^URL:\s*(\S+)", re.MULTILINE)
+_EXPLORE_PAGE_MIN_CHARS = 300
+_EXPLORE_PAGE_MAX_CHARS = 30_000  # per-page cap fed to extraction
+_KNOWN_AGENT_TYPES = set(_ROLE_REGISTRY)
+_KIND_FROM_AGENT = {
+    _search.AGENT_TYPE: "search",
+    _local_search.AGENT_TYPE: "search",
+    _writer.AGENT_TYPE: "write",
+    _explore.AGENT_TYPE: "explore",
+}
+_KIND_TO_AGENT_BY_KIND = {
+    "search": _search.AGENT_TYPE,
+    "write": _writer.AGENT_TYPE,
+    "explore": _explore.AGENT_TYPE,
+}
+
+_LEGACY_EXPLORE_BUDGET = {"max_searches": 8, "max_opens": 8, "max_finds": 8}
+
+
+def _default_agent_for_kind(kind: str, source_scope: dict[str, Any] | None = None) -> str:
+    """Only omitted search-agent choices follow a local task's source scope."""
+    if kind == "search" and (source_scope or {}).get("mode") == "local":
+        return _local_search.AGENT_TYPE
+    return _KIND_TO_AGENT_BY_KIND.get(kind, _search.AGENT_TYPE)
+
+
+def _p1_guard(state: Any, info: dict | None, agent_id: str) -> None:
+    """Check the dispatched attempt inside each result publication transaction."""
+    run_id = (info or {}).get("p1_run_id", "")
+    if not run_id:
+        return
+    from searchos.socm.revisions import assert_execution_current
+
+    execution = assert_execution_current(state, run_id)
+    task = next((q for q in state.frontier.questions if q.id == execution.task_id), None)
+    if task is None or task.assigned_agent_id != agent_id:
+        raise StaleExecutionError("Task was reassigned; this worker cannot publish")
+
+
+def _p1_publish_task(
+    state: Any, info: dict | None, agent_id: str, task_id: str, content: str,
+) -> None:
+    _p1_guard(state, info, agent_id)
+    run_id = (info or {}).get("p1_run_id", "")
+    if run_id:
+        from searchos.socm.revisions import publish_artifact, record_reads, snapshot_evidence
+
+        resources = info.get("extractions", ()) or (
+            (info["extraction"],) if info.get("extraction") else ()
+        )
+        observed_ids = {eid for resource in resources for eid in resource.committed_node_ids}
+        execution = state.p1.executions[run_id]
+        if observed_ids:
+            record_reads(state, run_id, evidence=snapshot_evidence(
+                state, observed_ids, scope_key=execution.scope_key,
+            ), artifacts={})
+        publish_artifact(state, run_id=run_id, artifact_id=f"task:{task_id}",
+                         kind="task", content=content)
+        execution.closed = True
+
+
+def _p2_record_experience(state, info, agent_id, task_id, pre_snapshot, duration_s):
+    """Credit observed collection outcomes after the guarded task publication."""
+
+    if not (current_run_config().enable_p2_context_memory or state.p2.enabled):
+        return
+    from searchos.harness.p2_memory import record_task_experience
+
+    resources = (info or {}).get("extractions", ()) or (
+        (info["extraction"],) if (info or {}).get("extraction") else ()
+    )
+    observed_ids = {eid for resource in resources for eid in resource.committed_node_ids}
+    record_task_experience(
+        state, task_id, agent_id, observed_ids,
+        execution_id=(info or {}).get("p1_run_id") or agent_id,
+        baseline_evidence_ids=pre_snapshot.get("evidence_ids", set()),
+        baseline_filled_cells=pre_snapshot.get("filled_keys", set()),
+        duration_s=duration_s,
+    )
+
+
+def _agent_budget_override(agent_type: str) -> dict[str, int]:
+    """Resolve the active per-role budget, including Explore rollback mode."""
+    from searchos.config.settings import AGENT_BUDGET_OVERRIDES, settings
+
+    if agent_type == "explore_agent" and not settings.enable_explore_batch:
+        return dict(_LEGACY_EXPLORE_BUDGET)
+    return dict(AGENT_BUDGET_OVERRIDES.get(agent_type, {}))
+
+
+def _format_full_list(items: list[Any], *, per_line: int = 20) -> str:
+    """Render every item while keeping long prompt blocks scan-friendly."""
+    vals = [str(x) for x in items]
+    if not vals:
+        return ""
+    if len(vals) <= per_line:
+        return ", ".join(vals)
+    lines = []
+    for i in range(0, len(vals), per_line):
+        lines.append(", ".join(vals[i:i + per_line]))
+    return "\n  " + "\n  ".join(lines)
+def _format_capped_list(items: list[Any], *, cap: int = 30, show: int = 20) -> str:
+    """Like ``_format_full_list`` but truncates past ``cap`` items — for
+    writer prompt blocks where the full enumeration is queryable via tools."""
+    vals = [str(x) for x in items]
+    if len(vals) <= cap:
+        return _format_full_list(vals)
+    return f"{', '.join(vals[:show])} ... (+{len(vals) - show} more)"
+def _check_schema_exists() -> str:
+    """Preflight: schema must exist before dispatching data-collecting agents.
+
+    Returns empty string on pass, error string on block.
+    """
+    assert _ctx.workspace is not None
+    state = _ctx.workspace.load_state()
+    if not state.coverage_map.tables and state.research_mode != "findings":
+        return (
+            "Error: schema is empty. Call ``create_schema(tables_json=..., "
+            "relations_json=...)`` BEFORE dispatching any sub-agents. "
+            "Single-table queries pass a length-1 array; multi-table "
+            "queries pass one object per table plus relations linking them."
+        )
+    return ""
+async def _continue_sub_agent_run(
+    agent_id: str,
+    follow_up: str,
+) -> Any:
+    """Coroutine body for a `continue_agent` Task.
+
+    Re-enters the same compiled graph via the same thread_id. MemorySaver
+    restores prior ``messages`` / tool state; the ``follow_up`` human
+    message is appended to that
+    history. A fresh pre-snapshot is taken at continue-time so the new
+    AgentReport's ``cells_filled`` / ``discovered_entities`` reflect only
+    what changed during THIS continuation, not the agent's full lifetime.
+    """
+    import time
+
+    info = _ctx.agent_graphs.get(agent_id)
+    if info is None:
+        from searchos.socm import AgentReport
+        return AgentReport(
+            agent_id=agent_id, status="error",
+            result=f"cannot continue {agent_id}: not in agent graph registry",
+        )
+
+    if info.get("p1_run_id"):
+        import uuid
+
+        # A continuation reuses memory only while all retained inputs are current.
+        # Revision repair is dispatched through _spawn_sub_agent with a new graph.
+        try:
+            info["p1_run_id"] = continue_run(
+                _ctx.workspace, info["p1_run_id"], f"{agent_id}:{uuid.uuid4().hex}",
+            )
+        except StaleExecutionError:
+            _ctx.completed.pop(agent_id, None)
+            raise
+
+    graph = info["graph"]
+    thread_id = info["thread_id"]
+    scope_entities = info.get("scope_entities")
+    # Refresh pre-snapshot + started_at for this turn's delta window.
+    pre_snapshot = _snapshot_state_for_diff(_ctx.workspace.load_state())
+    started_at = time.time()
+    # Update registry so subsequent continue_agents on same id diff
+    # against this turn's start, not the original spawn.
+    info["pre_snapshot"] = pre_snapshot
+    info["started_at"] = started_at
+    info["wrapped_task"] = follow_up  # for trace parity
+    info["continue_turn_count"] = info.get("continue_turn_count", 1) + 1
+
+    if _ctx.trajectory_logger:
+        _ctx.trajectory_logger._append_raw({
+            "type": "continue",
+            "agent": agent_id,
+            "follow_up": follow_up[:200],
+        })
+
+    # Re-bind the "current agent" ContextVar so writer tools
+    # can identify themselves. _spawn_sub_agent does this at initial
+    # spawn; a continuation must repeat it because ContextVars are
+    # per-task and the orchestrator's context may have been overwritten
+    # by later spawns before this continue coroutine runs.
+    from searchos.tools.search_state import (
+        set_current_agent,
+        set_current_table,
+        set_current_task,
+    )
+    set_current_agent(thread_id)
+    set_current_table(info.get("target_table", "") or "")
+    # Re-bind the current task too: SOCM resolver reads it to scope
+    # the per-agent view (entities whose name appears in task = in_scope).
+    # Without this rebind, _continue_sub_agent_run leaves stale task
+    # text from a sibling spawn that ran before in this orchestrator turn.
+    set_current_task(info.get("task", "") or "")
+    from searchos.tools.search_state import _current_task_id_var
+    _current_task_id_var.set(info.get("assigned_task_id", ""))
+
+    p1_token = current_run_id.set(info.get("p1_run_id", ""))
+    try:
+        pending_ids = info.pop("p1_pending_evidence_ids", [])
+        if pending_ids:
+            record_snapshot(_ctx.workspace, _ctx.workspace.load_state(), evidence_ids=pending_ids)
+        prev_msg_count = 0
+        latest_messages: list[Any] = []
+        async for event in graph.astream(
+            {"messages": [{"role": "user", "content": follow_up}]},
+            config={"configurable": {"thread_id": thread_id}},
+            stream_mode="values",
+        ):
+            if "messages" in event:
+                latest_messages = event["messages"]
+            if _ctx.conversation_logger and "messages" in event:
+                from searchos.harness.telemetry.conversation import (
+                    langchain_msg_to_conversation_msgs,
+                )
+                msgs = event["messages"]
+                for msg in msgs[prev_msg_count:]:
+                    for conv_msg in langchain_msg_to_conversation_msgs(msg):
+                        conv_msg.agent_name = thread_id
+                        conv_msg.parent_agent = "orchestrator"
+                        _ctx.conversation_logger.log(conv_msg)
+                prev_msg_count = len(msgs)
+
+        last_ai_text = ""
+        for message in reversed(latest_messages):
+            if getattr(message, "type", "") != "ai" or getattr(message, "tool_calls", None):
+                continue
+            content = getattr(message, "content", "")
+            if isinstance(content, list):
+                content = " ".join(block.get("text", "") for block in content
+                                   if isinstance(block, dict))
+            last_ai_text = str(content or "").strip()
+            break
+        # No global stats — see the comment in _collect_sub_agent_result.
+        report = _compute_agent_report(
+            agent_id=agent_id, thread_id=thread_id,
+            pre_snapshot=pre_snapshot, started_at=started_at,
+            status="completed", result="Continued",
+            scope_entities=scope_entities,
+            last_ai_text=last_ai_text,
+        )
+        # Logged AFTER report computation so the live view's agent tile
+        # shows this agent's own delta, not a bare "Continued".
+        if _ctx.trajectory_logger:
+            _ctx.trajectory_logger._append_raw({
+                "type": "agent_complete",
+                "agent": agent_id,
+                "turn": "continued",
+                "summary": report.result,
+            })
+        _ctx.completed[agent_id] = report
+        return report
+    except StaleExecutionError:
+        # A retired result is not a normal completed report or a retryable failure.
+        _ctx.completed.pop(agent_id, None)
+        raise
+    except Exception as e:
+        import traceback
+
+        tb = traceback.format_exc()
+        logger.error(
+            "continue_agent %s failed: %s(%s)",
+            agent_id, type(e).__name__, str(e).strip(), exc_info=True,
+        )
+        err_msg = str(e).strip() or type(e).__name__
+        if _ctx.trajectory_logger:
+            _ctx.trajectory_logger._append_raw({
+                "type": "agent_error",
+                "agent": agent_id,
+                "turn": "continued",
+                "error": err_msg[:500],
+                "error_type": type(e).__name__,
+                "traceback": tb[-2000:],
+            })
+        report = _compute_agent_report(
+            agent_id=agent_id, thread_id=thread_id,
+            pre_snapshot=pre_snapshot, started_at=started_at,
+            status="error", result=f"Error: {err_msg}",
+            scope_entities=scope_entities,
+        )
+        _ctx.completed[agent_id] = report
+        return report
+    finally:
+        current_run_id.reset(p1_token)
+def _find_writer_id() -> str | None:
+    """Return the agent_id of the single writer (if one exists in this session).
+
+    Writer is singleton by v2 design (§4 point 3: single writer, long-lived).
+    """
+    # A repair uses a fresh graph. Prefer its history over the retired writer.
+    for aid, info in reversed(list(_ctx.agent_graphs.items())):
+        if info.get("agent_type") == "writer_agent":
+            return aid
+    return None
+def _outline_status(state: Any) -> dict[str, Any]:
+    """Summarize how 'done' the writer's outline is, plus pointer to a
+    writer agent if one is registered. Used by check_agents to surface
+    draft status to the orchestrator (so it knows where the draft stands
+    without reading state itself).
+    """
+    sections = list(getattr(state.outline, "sections", []) or [])
+    total = len(sections)
+    with_content = sum(1 for s in sections if (s.content or "").strip())
+    threshold = max(1, int(total * _OUTLINE_CONTENT_RATIO))
+    complete = total >= _OUTLINE_MIN_SECTIONS and with_content >= threshold
+    writer_id = _find_writer_id()
+    writer_alive = bool(
+        writer_id
+        and writer_id in _ctx.task_pool
+        and not _ctx.task_pool[writer_id].done()
+    )
+    return {
+        "total_sections": total,
+        "sections_with_content": with_content,
+        "complete": complete,
+        "writer_id": writer_id or "",
+        "writer_alive": writer_alive,
+    }
+def _writer_last_evidence_count_var(writer_id: str) -> int:
+    """Tracks last evidence count seen at writer's last continue.
+
+    Stashed in agent_graphs[writer_id] so it survives across broker ticks.
+    """
+    info = _ctx.agent_graphs.get(writer_id, {})
+    return info.get("last_evidence_count", 0)
+def _set_writer_last_evidence_count(writer_id: str, n: int) -> None:
+    info = _ctx.agent_graphs.get(writer_id)
+    if info is not None:
+        info["last_evidence_count"] = n
+def _detect_scope_entities(task: str, entities: list[str]) -> set[str]:
+    """返回任务涉及的所有实体；空集交由调用方按无范围处理。"""
+    from searchos.util.scope import match_entities_in_task
+    return match_entities_in_task(task, entities)
+def _record_skill_failure(skill_name: str, params: dict) -> None:
+    """Plan §5.5 写入来源 2 — record a kind=skill StrategyPattern when an
+    access skill ran but produced zero new evidence. Scope to the
+    target cell when params carry ``entity`` (+ optionally ``attribute``
+    /``fields``) — otherwise record global.
+
+    StrategyMemory.record dedups on (kind, signature), so a second
+    failure bumps observed_count to 2 and the skill becomes ban-worthy
+    under the §6.4 list_skills filter.
+    """
+    if _ctx.workspace is None:
+        return
+    from searchos.socm import AntiPatternKind, AntiPatternScope
+    from searchos.socm.strategy import record_strategy_pattern
+    entity = str(params.get("entity", "")).strip() if isinstance(params, dict) else ""
+    attribute = ""
+    if isinstance(params, dict):
+        fields = params.get("fields") or params.get("attributes") or []
+        if isinstance(fields, list) and fields:
+            attribute = str(fields[0]).strip()
+        elif isinstance(params.get("attribute"), str):
+            attribute = params["attribute"].strip()
+    cells: list[str] = []
+    if entity and attribute:
+        cells = [f"{entity}.{attribute}"]
+    scope = AntiPatternScope(target_cells=cells, global_scope=not cells)
+
+    record_strategy_pattern(
+        _ctx.workspace,
+        kind=AntiPatternKind.SKILL,
+        signature=skill_name,
+        scope=scope,
+        reason="access-skill executor returned no new evidence",
+        created_by="sensor",
+    )
+def _build_antipattern_prompt(state: Any, *, scope_entities: set[str] | None = None) -> str:
+    """Plan §5.5 消费方 — render anti-patterns as a system-prompt block.
+
+    Filters:
+    - Scope: ``global_scope=True`` or ``target_cells`` matching any of
+      the current spawn's scope entities (prefix ``"<entity>."``).
+    - Age: entries older than ``_ANTIPATTERN_DECAY_S`` (30 min) are
+      dropped — stale signals shouldn't dominate late-session decisions.
+    - Severity: ``observed_count >= 2`` ⇒ rendered under "⛔ Blocked",
+      ``observed_count == 1`` ⇒ "⚠ Warn" (try a different angle).
+    Per-kind cap of 10 keeps the block bounded.
+    """
+    import time
+    patterns = getattr(state, "strategy_log", None)
+    if patterns is None:
+        return ""
+    records = getattr(patterns, "patterns", []) or []
+    if not records:
+        return ""
+
+    now = time.time()
+
+    def _in_scope(p: Any) -> bool:
+        scope = getattr(p, "scope", None)
+        if scope is None:
+            return True
+        if getattr(scope, "global_scope", False):
+            return True
+        cells = list(getattr(scope, "target_cells", []) or [])
+        if not cells:
+            return True
+        if not scope_entities:
+            return False
+        return any(
+            c == e or c.startswith(f"{e}.")
+            for e in scope_entities for c in cells
+        )
+
+    # severity → kind → list of (sig, reason, count, age_s)
+    by_sev: dict[str, dict[str, list[tuple[str, str, int, float]]]] = {
+        "block": {k: [] for k in ("query", "source", "skill", "branch", "claim")},
+        "warn":  {k: [] for k in ("query", "source", "skill", "branch", "claim")},
+    }
+    for p in records:
+        if not _in_scope(p):
+            continue
+        age = now - (getattr(p, "last_seen", 0.0) or getattr(p, "first_seen", 0.0) or now)
+        if age > _ANTIPATTERN_DECAY_S:
+            continue
+        kind = getattr(p.kind, "value", str(p.kind))
+        if kind not in by_sev["block"]:
+            continue
+        bucket = "block" if p.observed_count >= _ANTIPATTERN_BLOCK_THRESHOLD else "warn"
+        by_sev[bucket][kind].append((p.signature, p.reason, p.observed_count, age))
+
+    if not any(any(v) for v in by_sev.values()):
+        return ""
+
+    for sev_buckets in by_sev.values():
+        for kind, entries in sev_buckets.items():
+            # Put the most repeated and most recent failures first so the
+            # bounded prompt block preserves the highest-value warnings.
+            sev_buckets[kind] = sorted(entries, key=lambda e: (-e[2], e[3]))
+
+    labels = {
+        "query": "Queries that returned no new evidence",
+        "source": "Sources that returned placeholders / paywalls",
+        "skill": "Skills that failed on the current cell",
+        "branch": "Frontier subtrees already dropped",
+        "claim": "Evidence claims marked rejected",
+    }
+
+    lines = ["## Anti-patterns (此 session 内已碰壁的路径)"]
+    # Blocked section
+    if any(by_sev["block"].values()):
+        lines.append("\n### ⛔ Proven invalid — avoid (observed ≥2×)")
+        for kind, entries in by_sev["block"].items():
+            if not entries:
+                continue
+            lines.append(f"**{labels[kind]}:**")
+            for sig, reason, count, age in entries[:10]:
+                detail = f" — {reason[:90]}" if reason else ""
+                lines.append(f"- `{sig[:80]}` (×{count}, {int(age/60)}m ago){detail}")
+    # Warn section
+    if any(by_sev["warn"].values()):
+        lines.append("\n### ⚠ Tried once — prefer a different angle")
+        for kind, entries in by_sev["warn"].items():
+            if not entries:
+                continue
+            lines.append(f"**{labels[kind]}:**")
+            for sig, reason, count, age in entries[:10]:
+                detail = f" — {reason[:90]}" if reason else ""
+                lines.append(f"- `{sig[:80]}` ({int(age/60)}m ago){detail}")
+    return "\n".join(lines)
+def _build_sub_agent_context(state: Any, *, agent_type: str | None = None) -> str:
+    """Render the SOCM schema overview for a sub-agent.
+
+    Sub-agents receive only the task text; this block lists every
+    table's schema (and relations) so the agent knows what entities /
+    attributes / relations exist. Evidence Extraction commits extracted
+    evidence and updates coverage.
+    """
+    from searchos.config.settings import settings
+
+    if not settings.enable_socm_projection:
+        return ""
+
+    if agent_type == "writer_agent":
+        return _build_writer_socm_block(state)
+
+    cmap = getattr(state, "coverage_map", None)
+    if cmap is None or not cmap.tables:
+        return ""
+
+    lines: list[str] = ["## Schema (read-only)"]
+    for tid, ts in cmap.tables.items():
+        label = ts.table_label or tid
+        lines.append(f"### {label} (`{tid}`)")
+        if ts.primary_key:
+            lines.append(f"- Primary key: {', '.join(ts.primary_key)}")
+        if ts.row_label:
+            lines.append(f"- Row: {ts.row_label}")
+        lines.append(f"- Attributes: {', '.join(ts.attributes)}")
+        if ts.entities:
+            lines.append(
+                f"- Known rows ({len(ts.entities)}): "
+                "(see the current task projection for remaining targets)"
+            )
+
+    if cmap.relations:
+        lines.append("### Relations")
+        for r in cmap.relations:
+            fk = ",".join(r.foreign_key.columns)
+            tc = ",".join(r.foreign_key.target_columns)
+            tail = f" — {r.label}" if r.label else ""
+            lines.append(
+                f"- {r.from_table}.[{fk}] → {r.foreign_key.target_table}.[{tc}] "
+                f"({r.kind.value}){tail}"
+            )
+
+    lines.append("")
+    lines.append(
+        "Note: extract evidence by browsing — the middleware records findings into "
+        "the evidence graph and updates coverage automatically."
+    )
+    return "\n".join(lines)
+def _build_writer_socm_block(state: Any) -> str:
+    """Compact SOCM summary for writer_agent: coverage progress + open questions.
+
+    Writer has global drafting responsibility, so it gets an overview
+    instead of the task-cells slice that search agents receive.
+    """
+    from searchos.tools.socm_read import coverage_summary
+
+    cmap = getattr(state, "coverage_map", None)
+    lines = ["## Coverage Progress"]
+    if cmap is not None and cmap.total_cells > 0:
+        summary = coverage_summary(state)
+        by_status = summary["by_status"]
+        filled = by_status.get("filled", 0)
+        pct = round(100 * filled / summary["total"]) if summary["total"] else 0
+        lines.append(
+            f"Filled: {filled}/{summary['total']} cells ({pct}%) | "
+            f"uncertain: {by_status.get('uncertain', 0)} | "
+            f"missing: {by_status.get('missing', 0)} | "
+            f"conflicts: {len(summary['conflict_cells'])}"
+        )
+        for t in summary["tables"]:
+            lines.append(
+                f"Table {t['table_label'] or t['table_id']}: "
+                f"{t['n_entities']} entities × {t['n_attributes']} attributes"
+            )
+        lines.append(
+            f"Entities ({len(cmap.table_schema.entities)}): "
+            f"{_format_capped_list(cmap.table_schema.entities)}"
+        )
+        lines.append(
+            f"Attributes ({len(cmap.table_schema.attributes)}): "
+            f"{_format_capped_list(cmap.table_schema.attributes)}"
+        )
+        worst_attrs = sorted(
+            summary["by_attribute"], key=lambda a: -a["missing"]
+        )[:8]
+        worst_attrs = [a for a in worst_attrs if a["missing"]]
+        if worst_attrs:
+            lines.append(
+                "Top missing attributes: "
+                + ", ".join(f"{a['attribute']}({a['missing']})" for a in worst_attrs)
+            )
+        if summary["worst_entities"]:
+            lines.append(
+                "Top missing entities: "
+                + ", ".join(
+                    f"{e['entity']}({e['missing']})"
+                    for e in summary["worst_entities"][:8]
+                )
+            )
+        lines.append(
+            "Drill down with read_coverage(mode=\"cells\", ...) filters; "
+            "do not pull the full cell list unfiltered."
+        )
+    else:
+        lines.append("(schema not yet built)")
+
+    nodes = getattr(getattr(state, "evidence_graph", None), "nodes", []) or []
+    if nodes:
+        lines.append(
+            f"\n## Evidence\n{len(nodes)} nodes — read with "
+            "read_evidence(entity=..., attribute=...) slices; never guess content from ids."
+        )
+
+    frontier = getattr(state, "frontier", None)
+    tasks = getattr(frontier, "questions", []) or []
+    if tasks:
+        counts: dict[str, int] = {}
+        for t in tasks:
+            counts[t.status.value] = counts.get(t.status.value, 0) + 1
+        with_report = sum(1 for t in tasks if t.resolution)
+        lines.append(
+            "\n## Frontier\n"
+            + " | ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+            + (
+                f" — {with_report} task(s) carry agent reports "
+                "(list_frontier + read_task_report)"
+                if with_report
+                else ""
+            )
+        )
+        open_q = sorted(frontier.open_questions, key=lambda q: -q.priority)[:10]
+        if open_q:
+            lines.append("Open questions (top 10 by priority):")
+            for q in open_q:
+                lines.append(f"- [{q.id}] {q.question[:120]}")
+
+    return "\n".join(lines)
+def _snapshot_state_for_diff(state: Any) -> dict[str, Any]:
+    """Capture the fields AgentReport needs to compute deltas against later.
+
+    Minimal: coverage filled-cell keys + evidence node ids + draft length.
+    These feed the search/writer report variants without dragging
+    the whole SearchState.
+    """
+    filled_keys = {
+        k for k, c in state.coverage_map.cells.items()
+        if c.status.value == "filled"
+    }
+    evidence_ids = {n.id for n in state.evidence_graph.nodes}
+    return {
+        "filled_keys": filled_keys,
+        "evidence_ids": evidence_ids,
+        "draft_length": len(getattr(state, "draft", "") or ""),
+    }
+def _extract_explore_open_pages(messages: list) -> list[dict]:
+    """Pull (url, markdown) for every page returned by ``open``
+    during a explore run.
+
+    Skips error tool-results and pages with no parseable URL header.
+    """
+    out: list[dict] = []
+    for msg in messages:
+        kind = (getattr(msg, "type", "") or msg.__class__.__name__).lower()
+        if "tool" not in kind:
+            continue
+        name = (getattr(msg, "name", "") or "").lower()
+        if name not in ("open", "browser_open", "explore_web"):
+            continue
+        content = getattr(msg, "content", "") or ""
+        if isinstance(content, list):
+            content = "\n".join(
+                p.get("text", "") if isinstance(p, dict) else str(p)
+                for p in content
+            )
+        content = str(content)
+        if not content.strip() or content.lstrip().lower().startswith("error"):
+            continue
+        content = content.strip()
+        # ``explore_web`` returns several independently replayable page
+        # blocks in one tool result. Keep every block; treating the combined
+        # output as one page would silently retain only its first hub URL.
+        candidates = [content]
+        if name == "explore_web":
+            candidates = [
+                block.split("<<<END_EXPLORE_PAGE>>>", 1)[0].strip()
+                for block in content.split("<<<EXPLORE_PAGE>>>")[1:]
+            ]
+        for page_content in candidates:
+            if len(page_content) < _EXPLORE_PAGE_MIN_CHARS:
+                continue
+            m = _EXPLORE_PAGE_URL_HDR.search(page_content)
+            url = m.group(1).strip() if m else ""
+            if not url.startswith("http"):
+                continue
+            if len(page_content) > _EXPLORE_PAGE_MAX_CHARS:
+                page_content = page_content[:_EXPLORE_PAGE_MAX_CHARS]
+            out.append({"source_url": url, "content": page_content})
+    # Dedup by URL — keep the longest body per URL
+    by_url: dict[str, dict] = {}
+    for item in out:
+        prev = by_url.get(item["source_url"])
+        if prev is None or len(item["content"]) > len(prev["content"]):
+            by_url[item["source_url"]] = item
+    return list(by_url.values())
+def _is_rate_limit_error(result: str) -> bool:
+    low = (result or "").lower()
+    return "429" in low or "rate limit" in low or "rate_limit" in low
+def _recycle_failed_task(
+    task_id: str, agent_id: str, status: str, result: str,
+) -> None:
+    """失败 agent 的绑定任务回收：循环停止且有有效事实时取消原任务，交回主
+    Agent 核对缺口；其他失败翻回 PENDING 允许重派（attempts 已由
+    set_running/next 累加），达到 MAX_TASK_ATTEMPTS 则 CANCELLED。
+    429/限流类失败额外记 ``not_before`` 冷却，防止下一个 tick 立刻把
+    空槽填回同一个限流里（派发风暴）。"""
+    import time as _time
+
+    from searchos.config.settings import settings as _settings
+    from searchos.socm import MAX_TASK_ATTEMPTS
+    from searchos.socm import FrontierTaskStatus as _Q
+
+    outcome = {"v": ""}
+    rate_limited = _is_rate_limit_error(result)
+
+    def _apply(s: Any) -> Any:
+        _p1_guard(s, (getattr(_ctx, "agent_graphs", None) or {}).get(agent_id), agent_id)
+        for q in s.frontier.questions:
+            if q.id != task_id:
+                continue
+            if q.status not in (_Q.RUNNING, _Q.BLOCKED):
+                break
+            from searchos.socm.coverage import answer_evidence
+            valid_ids = {node.id for node in answer_evidence(s)}
+            has_findings = any(
+                binding.task_id == task_id and binding.evidence_id in valid_ids
+                for binding in s.evidence_graph.task_bindings
+            )
+            if status == "looped" and q.kind == "search" and has_findings:
+                # Stop this attempt without declaring the research complete.
+                # The orchestrator must assess remaining gaps before dispatch.
+                q.status = _Q.CANCELLED
+                q.resolution = (
+                    "partial_evidence_review_required: valid task evidence retained; "
+                    "review with read_evidence and enqueue only concrete unresolved gaps."
+                )
+                outcome["v"] = "review_required"
+            elif q.attempts >= MAX_TASK_ATTEMPTS:
+                q.status = _Q.CANCELLED
+                q.resolution = f"max_attempts ({q.attempts}): {result[:300]}"
+                outcome["v"] = "cancelled"
+            else:
+                q.status = _Q.PENDING
+                q.priority = max(0.05, q.priority * 0.9)
+                outcome["v"] = "requeued"
+                if rate_limited:
+                    q.not_before = (
+                        _time.time() + _settings.rate_limit_recycle_cooldown_s
+                    )
+            q.previous_queries = list(q.attempt_queries or q.previous_queries)
+            q.previous_source_families = list(q.attempt_source_families or q.previous_source_families)
+            q.attempt_queries = []
+            q.attempt_source_families = []
+            q.assigned_agent_id = ""
+            q.last_agent_report_excerpt = f"[{status}] {agent_id}: {result}"[:200]
+            q.updated_at = _time.time()
+            break
+        return s
+
+    try:
+        _ctx.workspace.atomic_update_state(_apply)
+    except StaleExecutionError:
+        raise
+    except Exception:  # noqa: BLE001 — 回收失败不应拖垮报告路径
+        logger.warning("task recycle failed for %s", task_id, exc_info=True)
+        return
+    tlog = getattr(_ctx, "trajectory_logger", None)
+    if outcome["v"] and tlog:
+        event = {
+            "type": "harness",
+            "kind": "task_recycled",
+            "task_id": task_id,
+            "agent": agent_id,
+            "agent_status": status,
+            "outcome": outcome["v"],
+        }
+        if rate_limited and outcome["v"] == "requeued":
+            from searchos.config.settings import settings as _settings
+            event["rate_limit_cooldown_s"] = _settings.rate_limit_recycle_cooldown_s
+        tlog._append_raw(event)
+def _compute_agent_report(
+    *,
+    agent_id: str,
+    thread_id: str,
+    pre_snapshot: dict[str, Any],
+    started_at: float,
+    status: str,
+    result: str,
+    scope_entities: set[str] | None = None,
+    last_ai_text: str = "",
+    explore_pages: list[dict] | None = None,
+) -> Any:
+    """Diff post-state against pre_snapshot to build an AgentReport.
+
+    Dispatches to the correct subclass by looking up the agent_type we
+    stashed at spawn time. Downstream consumers read the ``kind`` field
+    to branch.
+
+    Respects sensor signals: if LoopSensor has written
+    ``state.agent_status[thread_id] = "looped"`` the status argument is
+    overridden to ``"looped"``.
+    """
+    import time
+
+    from searchos.socm import (
+        ExploreReport,
+        SearchReport,
+        WriterReport,
+    )
+
+    duration_s = time.time() - started_at
+    agent_type = "search_agent"
+    info = _ctx.agent_graphs.get(agent_id) if _ctx.agent_graphs else None
+    if info is not None:
+        agent_type = info.get("agent_type", "search_agent")
+
+    if _ctx.workspace is None:
+        # Degraded: return a minimal report of the right kind
+        if agent_type == "writer_agent":
+            return WriterReport(agent_id=agent_id, status=status,
+                                result=result, duration_s=duration_s)
+        if agent_type == "explore_agent":
+            return ExploreReport(agent_id=agent_id, status=status,
+                                result=result, duration_s=duration_s)
+        return SearchReport(agent_id=agent_id, status=status,
+                            result=result, duration_s=duration_s)
+
+    state = _ctx.workspace.load_state()
+    _p1_guard(state, info, agent_id)
+
+    # Sensor signals are the final run outcome. Apply them before deciding
+    # whether the bound Frontier task completed or needs to be recycled.
+    sensor_status = state.agent_status.get(thread_id)
+    if sensor_status == "looped":
+        status = "looped"
+
+    # Agent 没有正常完成时回收其绑定任务：留在 RUNNING 会让后续同 target 的
+    # 重派被 _find_duplicate 判重而静默拒绝，目标永远得不到验证。
+    if status in ("error", "failed", "looped"):
+        bound_task_id = ""
+        if info:
+            bound_task_id = (
+                info.get("assigned_task_id", "") or info.get("write_task_id", "")
+            )
+        if bound_task_id:
+            _recycle_failed_task(bound_task_id, agent_id, status, result)
+            state = _ctx.workspace.load_state()
+
+    if agent_type == "explore_agent":
+        deferred_stash = None
+        # Stash the briefing as a synthetic page so create_schema can
+        # replay extraction over it once tables are declared. Explore
+        # has no extraction middleware attached, so this is the only
+        # surface where the briefing exists in stashable form.
+        if status == "completed" and len(last_ai_text.strip()) >= 50:
+            synthetic_url = f"agent://{agent_id or 'explore_agent'}/final_summary"
+            pages_to_stash = list(explore_pages or [])
+            def _stash(s: Any) -> Any:
+                _p1_guard(s, info, agent_id)
+                s.pending_agent_summaries.append({
+                    "agent_id": agent_id,
+                    "source_url": synthetic_url,
+                    "content": last_ai_text,
+                })
+                # Also stash the raw hub pages explore opened so extraction
+                # sees the full source content, not just the briefing's
+                # LLM-summarized subset (briefing typically captures only
+                # ~65% of the entities visible on the page; the missing
+                # 35% would otherwise be lost until search_agent re-fetches).
+                for p in pages_to_stash:
+                    s.pending_agent_summaries.append({
+                        "agent_id": agent_id,
+                        "source_url": p["source_url"],
+                        "content": p["content"],
+                    })
+                return s
+            try:
+                if info and info.get("p1_run_id"):
+                    deferred_stash = _stash
+                else:
+                    _ctx.workspace.atomic_update_state(_stash)
+                if _ctx.trajectory_logger:
+                    _ctx.trajectory_logger._append_raw({
+                        "type": "harness",
+                        "kind": "pending_summary_stashed",
+                        "agent": agent_id,
+                        "chars": len(last_ai_text),
+                        "explore_pages": len(pages_to_stash),
+                    })
+            except StaleExecutionError:
+                raise
+            except Exception:  # noqa: BLE001 — stash is best-effort
+                logger.debug("explore pending-summary stash failed", exc_info=True)
+
+        # Resolve the bound Frontier task so the Scheduler doesn't re-drain it.
+        assigned_explore_task_id = info.get("assigned_task_id", "") if info else ""
+        if assigned_explore_task_id and status == "completed":
+            import time as _time
+            def _resolve_explore(s: Any) -> Any:
+                from searchos.socm import FrontierTaskStatus as _Q
+                for q in s.frontier.questions:
+                    if q.id == assigned_explore_task_id:
+                        if q.status != _Q.CANCELLED and (
+                            q.status != _Q.COMPLETED or info.get("p1_run_id")
+                        ):
+                            if deferred_stash is not None:
+                                deferred_stash(s)
+                            _p1_publish_task(s, info, agent_id, q.id,
+                                             (last_ai_text or result)[:500])
+                            q.status = _Q.COMPLETED
+                            q.resolution = (last_ai_text or result)[:500]
+                            q.updated_at = _time.time()
+                        break
+                return s
+            _ctx.workspace.atomic_update_state(_resolve_explore)
+
+        return ExploreReport(
+            agent_id=agent_id,
+            status=(
+                "completed" if (status == "completed" and last_ai_text.strip())
+                else (status if status in ("error", "looped") else "failed")
+            ),
+            # ``result`` is the short stat summary (for UI); the verbatim
+            # brief lives in ``last_message`` — don't duplicate it here.
+            result=(result or "explore_agent exited without emitting a final brief"),
+            duration_s=duration_s,
+            last_message=last_ai_text,
+        )
+
+    if agent_type == "writer_agent":
+        rendered = state.outline.rendered()
+        draft_len_post = len(rendered)
+        draft_len_pre = pre_snapshot.get("draft_length", 0)
+        my_search = [
+            q for q in state.frontier.questions
+            if q.kind == "search" and q.created_by == "writer"
+            and q.status.value in ("pending", "running")
+        ]
+        # Close the sensor-authored kind=write task when the writer
+        # completes — plan §5.2.3 写入来源 4 lifecycle.
+        write_task_id = (
+            info.get("assigned_task_id", "") or info.get("write_task_id", "")
+        ) if info else ""
+        if write_task_id and status == "completed":
+            import time as _time
+            def _resolve_write(s: Any) -> Any:
+                for q in s.frontier.questions:
+                    if q.id == write_task_id:
+                        _p1_publish_task(s, info, agent_id, q.id, last_ai_text or result)
+                        from searchos.socm import FrontierTaskStatus as _Q
+                        q.status = _Q.COMPLETED
+                        q.resolution = (last_ai_text or result)
+                        q.updated_at = _time.time()
+                        break
+                return s
+            _ctx.workspace.atomic_update_state(_resolve_write)
+
+        turn_count = info.get("continue_turn_count", 1) if info else 1
+        draft_delta = max(0, draft_len_post - draft_len_pre)
+        own_delta = f"draft +{draft_delta} chars (total {draft_len_post})"
+        return WriterReport(
+            agent_id=agent_id,
+            status=("completed" if status == "completed" else status),
+            result=f"{result}: {own_delta}" if result else own_delta,
+            draft_length=draft_len_post,
+            draft_delta=draft_delta,
+            missing_evidence_count=len(my_search),
+            continue_turn_count=turn_count,
+            duration_s=duration_s,
+            last_message=last_ai_text,
+        )
+
+    # Default: SearchReport.
+    # If this search agent was bound to a FrontierTask (orchestrator
+    # dispatch with target_cells, or broker-drained agent-emit), close
+    # that task on completion so the queue reflects reality and the
+    # writer's list_frontier sees it gone.
+    assigned_search_task_id = info.get("assigned_task_id", "") if info else ""
+    if assigned_search_task_id and status == "completed":
+        import time as _time
+        def _resolve_search(s: Any) -> Any:
+            for q in s.frontier.questions:
+                if q.id == assigned_search_task_id:
+                    from searchos.socm import FrontierTaskStatus as _Q
+                    if q.status != _Q.CANCELLED and (
+                        q.status != _Q.COMPLETED or info.get("p1_run_id")
+                    ):
+                        _p1_publish_task(s, info, agent_id, q.id, last_ai_text or result)
+                        q.status = _Q.COMPLETED
+                        q.resolution = (last_ai_text or result)
+                        q.updated_at = _time.time()
+                        _p2_record_experience(
+                            s, info, agent_id, q.id, pre_snapshot, duration_s,
+                        )
+                    break
+            return s
+        _ctx.workspace.atomic_update_state(_resolve_search)
+        # Refresh state for downstream metrics that read frontier.
+        state = _ctx.workspace.load_state()
+
+    post_filled = {
+        k for k, c in state.coverage_map.cells.items()
+        if c.status.value == "filled"
+    }
+    newly_filled = post_filled - pre_snapshot["filled_keys"]
+
+    # Per-agent attribution: each sub-agent's ExtractionCoordinator records
+    # the node ids it committed. The global pre/post diff (new_nodes) also counts
+    # peers' evidence written concurrently, so intersect with that tally; fall
+    # back to the scope filter, then the raw diff.
+    new_nodes = [
+        n for n in state.evidence_graph.nodes
+        if n.id not in pre_snapshot["evidence_ids"]
+    ]
+    extraction = info.get("extraction") if info else None
+    extractions = info.get("extractions", ()) if info else ()
+    own_ids = (
+        frozenset(node_id for resource in extractions for node_id in resource.committed_node_ids)
+        if extractions else getattr(extraction, "committed_node_ids", None)
+    )
+    if own_ids is not None:
+        agent_new_nodes = [n for n in new_nodes if n.id in own_ids]
+    elif scope_entities:
+        agent_new_nodes = [n for n in new_nodes if n.entity in scope_entities]
+    else:
+        agent_new_nodes = new_nodes
+
+    # Same attribution for filled cells (newly_filled also holds peer-filled).
+    if own_ids is not None:
+        cells_filled = sorted(
+            key for key in newly_filled
+            if set(state.coverage_map.cells[key].supporting_evidence_ids) & set(own_ids)
+        )
+    else:
+        attributing_entities = scope_entities
+        if attributing_entities is not None:
+            from searchos.socm import CoverageMap
+            cells_filled = sorted(
+                k for k in newly_filled
+                if CoverageMap.parse_cell_key(k)[1] in attributing_entities
+            )
+        else:
+            cells_filled = sorted(newly_filled)
+
+    schema_entities = set(state.coverage_map.table_schema.entities)
+    # Discovered rows = new entities among this agent's own nodes not yet in schema.
+    discovery_nodes = agent_new_nodes if own_ids is not None else new_nodes
+    discovered = sorted({
+        n.entity for n in discovery_nodes
+        if n.entity and n.entity not in schema_entities
+    })
+    dead_ends = list(state.agent_dead_ends.get(thread_id, []))
+
+    # P1: evidence/scope signals so orchestrator can distinguish
+    # "found data but scope mismatched" from "truly nothing".
+    evidence_nodes_added = len(agent_new_nodes)
+    partial_scope_count = sum(
+        1 for n in agent_new_nodes if n.scope_match == "partial"
+    )
+
+    # Append this agent's OWN delta — never global coverage, which reads
+    # as task progress and misleads the orchestrator. Kept compact: the
+    # live-view tile shows ~46 chars.
+    own_delta = (
+        f"+{evidence_nodes_added} evidence"
+        + (f" ({partial_scope_count} partial)" if partial_scope_count else "")
+        + (f", {len(discovered)} new rows" if discovered else "")
+    )
+    result = f"{result}: {own_delta}" if result else own_delta
+    pending_extraction = sum(
+        resource.summary().buffered
+        for resource in (extractions or ((extraction,) if extraction else ()))
+        if callable(getattr(resource, "summary", None))
+    )
+    if pending_extraction:
+        result += (
+            f"; {pending_extraction} observation(s) retained for extraction retry. "
+            "Extraction is incomplete; use committed evidence and inspect the remaining gaps."
+        )
+
+    return SearchReport(
+        agent_id=agent_id,
+        task_ids=[assigned_search_task_id] if assigned_search_task_id else [],
+        status=status, result=result,
+        cells_filled=cells_filled,
+        dead_ends=dead_ends,
+        discovered_entities=discovered,
+        evidence_nodes_added=evidence_nodes_added,
+        partial_scope_count=partial_scope_count,
+        duration_s=duration_s,
+        # Preserve tables and scope qualifiers, including data not yet committed.
+        last_message=last_ai_text,
+    )
+def _next_agent_label(agent_type: str) -> str:
+    """Per-type monotonic label, scoped to the current orchestrator context.
+
+    First instance of a type gets the bare type name (``explore_agent``).
+    Second and subsequent instances get a ``_N`` suffix where N starts at 2
+    (``search_agent``, ``search_agent_2``, ``search_agent_3``).
+
+    Counter lives in a ContextVar so concurrent harness runs (e.g. eval
+    benchmark with N parallel queries) don't share IDs.
+    """
+    counters = _sub_agent_counter_var.get()
+    if counters is None:
+        counters = {}
+        _sub_agent_counter_var.set(counters)
+    n = counters.get(agent_type, 0) + 1
+    counters[agent_type] = n
+    return agent_type if n == 1 else f"{agent_type}_{n}"
+async def _spawn_sub_agent(
+    agent_type: str,
+    task: str,
+    skill_names: list[str],
+    bind_task_id: str = "",
+    *,
+    target_table: str = "",
+    search_budget: int | None = None,
+    middleware: list[Any] | None = None,
+    strategy_guidance: str = "",
+) -> str:
+    """Build sub-agent graph, register it, create an asyncio.Task wrapping
+    its run — return ``agent_id`` immediately.
+
+    ``bind_task_id`` (scheduler only): when set, binds this spawn to an
+    existing FrontierTask being picked off the queue.
+
+    ``target_table``: which CoverageMap table this agent's evidence
+    should fill. Stored on agent_graphs and re-bound to the
+    ``_current_table_var`` ContextVar inside the agent's coroutine
+    so the extraction middleware routes findings correctly.
+    """
+    import time
+
+    from searchos.agents.runtime import create_search_agent_graph
+    from searchos.harness.middleware.sensor.core.models import BudgetState
+
+    assert _ctx.workspace is not None
+    assert _ctx.model is not None
+
+    # Plan §6.4 单 agent strategy skill 注入上限 K — clamp here so no
+    # caller can blow up the system prompt by passing 20 skills.
+    if skill_names and len(skill_names) > MAX_SKILLS_PER_DISPATCH:
+        logger.warning(
+            "Spawn %s requested %d skills > K=%d; truncating to first %d "
+            "(plan §6.4).",
+            agent_type, len(skill_names), MAX_SKILLS_PER_DISPATCH,
+            MAX_SKILLS_PER_DISPATCH,
+        )
+        skill_names = skill_names[:MAX_SKILLS_PER_DISPATCH]
+
+    if agent_type not in _KNOWN_AGENT_TYPES:
+        logger.info(
+            "Mapping unknown agent_type %r → search_agent", agent_type,
+        )
+        agent_type = "search_agent"
+
+    from searchos.agents.orchestrator.catalog import _is_agent_enabled
+    if not _is_agent_enabled(agent_type):
+        raise ValueError(f"Agent is unavailable in this source scope: {agent_type}")
+
+    # Local retrieval is deliberately isolated: Access Skills can include web
+    # executors and their bodies add unrelated routing instructions.
+    if agent_type == _local_search.AGENT_TYPE and skill_names:
+        logger.info("Ignoring skills for isolated local_search_agent")
+        skill_names = []
+
+    agent_label = _next_agent_label(agent_type)
+    assigned_task_id = ""
+    # Bind for every type (scheduler always passes bind_task_id; without
+    # this, an OPEN task gets re-drained while its agent is still running).
+    if bind_task_id:
+        assigned_task_id = bind_task_id
+        def _bind(s: Any) -> Any:
+            from searchos.socm import FrontierTaskStatus as _S
+            for q in s.frontier.questions:
+                if q.id == bind_task_id:
+                    q.assigned_agent_id = agent_label
+                    if q.status == _S.PENDING:
+                        q.status = _S.RUNNING
+                        q.attempts += 1
+                    break
+            return s
+        _ctx.workspace.atomic_update_state(_bind)
+
+    # 各角色拥有独立工具集；Web Search 使用固定的技能发现、加载和 exec 工具。
+    role = _ROLE_REGISTRY[agent_type]
+    from searchos.tools.search_state import _source_scope_var
+    source_scope = _source_scope_var.get()
+    tools = list(role.get_tools(skill_names, model_access=True)) if (
+        agent_type == _local_search.AGENT_TYPE and source_scope is not None
+    ) else list(role.get_tools(skill_names))
+
+    # Build system prompt: agent.md first (persona), then SOCM context
+    state = _ctx.workspace.load_state()
+    assigned = next((q for q in state.frontier.questions if q.id == assigned_task_id), None)
+    import uuid
+
+    p1_run_id = begin_run(
+        _ctx.workspace, assigned_task_id, f"{agent_label}:{uuid.uuid4().hex}",
+        scope_key=getattr(assigned, "p1_scope_key", "answer"),
+    )
+    if p1_run_id:
+        state = _ctx.workspace.load_state()
+    prompt_parts: list[str] = []
+    static_assembly_parts: list[str] = []
+    if agent_type == _local_search.AGENT_TYPE and source_scope is not None:
+        paths = "\n".join(
+            f"{r['relative_path']}: documents/{r['document_id']}.md"
+            for r in source_scope.get("documents", [])
+        )
+        if source_scope.get("selection") == "library":
+            prompt_parts.append(
+                "本轮可探索当前知识库的可读文档快照。先按任务使用 local_catalog(query=...) "
+                "检索目录，或读取 local_catalog() 浏览范围；再沿相关文档目录定位并读取原文。"
+                "未匹配文件名不表示库内没有相关材料；可检索摘要和别名。不要遍历无关资料。"
+            )
+        else:
+            prompt_parts.append("本轮只允许读取这些已选文档，直接从对应目录开始：\n" + paths)
+    assigned = next((q for q in state.frontier.questions if q.id == assigned_task_id), None)
+    if assigned and assigned.blocked_by:
+        from searchos.socm.coverage import answer_evidence
+        ids = {b.evidence_id for b in state.evidence_graph.task_bindings
+               if b.task_id in assigned.blocked_by}
+        supporting = [{"id": n.id, "finding": n.finding, "source": n.source}
+                      for n in answer_evidence(
+                          state, use_scope=getattr(assigned, "p1_scope_key", "answer"))
+                      if n.id in ids]
+        with execution_context(p1_run_id):
+            record_snapshot(_ctx.workspace, state, evidence_ids=[n["id"] for n in supporting])
+        prompt_parts.append("前置任务的已核验发现（按当前问题继续核查）：\n" +
+                            json.dumps(supporting, ensure_ascii=False))
+
+    from pathlib import Path
+
+    from searchos.config.settings import settings as _prompt_settings
+
+    agent_md_name = (
+        "agent_legacy.md"
+        if agent_type == "explore_agent" and not _prompt_settings.enable_explore_batch
+        else "agent.md"
+    )
+    agent_md_path = Path(role.__file__).parent / agent_md_name
+    if agent_md_path.exists():
+        from searchos.agents.toolset_render import render_toolset
+        persona = agent_md_path.read_text(encoding="utf-8")
+        rendered = render_toolset(tools, header="## Available Tools")
+        persona = persona.replace("{toolset}", rendered)
+        prompt_parts.append(persona)
+        static_assembly_parts.append(persona)
+        if agent_type == _search.AGENT_TYPE and any(
+            getattr(tool, "name", "") == "read_visual" for tool in tools
+        ):
+            image_prompt = agent_md_path.with_name("image_reading.md")
+            if image_prompt.exists():
+                image_instructions = image_prompt.read_text(encoding="utf-8")
+                prompt_parts.append(image_instructions)
+                static_assembly_parts.append(image_instructions)
+
+    # After the persona and date-only: dynamic content at the top of the
+    # system prompt forks the prompt-cache prefix on every dispatch, so
+    # same-type sub-agents could never share the cached persona/toolset.
+    from datetime import datetime as _dt
+
+    from searchos.agents.temporal import render_temporal_grounding
+    prompt_parts.append(render_temporal_grounding(
+        _dt.now().strftime("%Y-%m-%d"),
+        agent_type,
+    ))
+
+    route_task = next((q for q in state.frontier.questions if q.id == assigned_task_id), None)
+    if route_task:
+        from searchos.socm.retry_routes import retry_route_prompt
+        route_prompt = retry_route_prompt(route_task)
+        if route_prompt:
+            prompt_parts.append(route_prompt)
+
+    scope_entities = _detect_scope_entities(
+        task, state.coverage_map.table_schema.entities,
+    )
+
+    if agent_type != "explore_agent":
+        socm_block = _build_sub_agent_context(state, agent_type=agent_type)
+        if socm_block:
+            prompt_parts.append(socm_block)
+
+    missing_skills: list[str] = []
+    if skill_names and _ctx.skill_registry and any(getattr(t, 'name', '') == 'load_skill' for t in tools):
+        from searchos.tools.skill_catalog import _skill_allowed
+        skill_parts: list[str] = []
+        for sname in skill_names:
+            skill = _ctx.skill_registry.get(sname)
+            if not skill:
+                logger.warning("Skill '%s' not found in registry — Orchestrator hallucinated a name", sname)
+                missing_skills.append(sname)
+                continue
+            if not _skill_allowed(skill):
+                continue
+            if skill.body:
+                skill_parts.append(f"### {skill.meta.name}\n{skill.meta.description}")
+                # Anti-patterns live in a sibling ``anti_patterns.md``
+                # and are loaded separately into the Skill object. Inject
+                # only the one-line index by default; sub-agents pull
+                # details on demand via ``load_anti_patterns``. This
+                # keeps the injected skill footprint small (~300 tokens
+                # vs ~3-6k for a fully-inlined AP list).
+                ap_index = getattr(skill, "anti_patterns_index", "") or ""
+                if ap_index:
+                    skill_parts.append(
+                        f"**{skill.meta.name} — known failure modes** "
+                        f"(call `load_anti_patterns(\"{sname}\")` for "
+                        "details if any of these look relevant):\n"
+                        + ap_index
+                    )
+                skill_parts.append(
+                    f"Consider `load_skill(\"{sname}\")` if it fits the current need. "
+                    "Apply method instructions through your existing tools; use exec "
+                    "only for documented scripts. You may discover a better fit with list_skills."
+                )
+        if skill_parts:
+            prompt_parts.append("## Recommended Skills\n" + "\n\n".join(skill_parts))
+
+    # Plan §5.5 消费方 — Control: inject anti-patterns so the agent
+    # avoids paths that have already failed in this session. Scoped by
+    # target_cell when the spawn has scope entities, plus any global
+    # entries.
+    # Failure-memory block (post-mortem distilled advice) renders ABOVE
+    # the anti-pattern block — strategy guidance precedes the raw bullet
+    # list of failed queries/sources/skills.
+    failure_memory_block = _build_failure_memory_prompt(state, scope_entities=scope_entities, task=task)
+    if failure_memory_block:
+        prompt_parts.append(failure_memory_block)
+    ap_block = _build_antipattern_prompt(state, scope_entities=scope_entities)
+    if ap_block:
+        prompt_parts.append(ap_block)
+
+    if assigned and assigned.result_mode == "findings":
+        prompt_parts.append(
+            "Read sources to collect supported facts and limitations for the assigned question. "
+            "Evidence Extraction automatically binds verified evidence to this task. "
+            "Evidence Extraction uses the applicable schema and fills supported cells "
+            "automatically; without a schema, Extraction records independent findings. "
+            "Preserve source references and identify unresolved questions."
+        )
+    strategy_guidance_applied = bool(strategy_guidance and agent_type in {"search_agent", "local_search_agent"})
+    if strategy_guidance_applied:
+        prompt_parts.append("## 本次子任务的候选检索方法\n权限、来源范围和预算仍遵守已有规则。\n" + strategy_guidance)
+    system_prompt = "\n\n".join(prompt_parts)
+
+    # Enforce budgets independently of optional trajectory logging.
+    from searchos.config.settings import settings
+
+    override = _agent_budget_override(agent_type)
+    # Precedence: per-task > agent-type override > settings default.
+    if search_budget is not None:
+        max_searches = max(
+            1, min(int(search_budget),
+                   settings.max_searches_per_sub_agent_ceiling),
+        )
+    else:
+        max_searches = override.get("max_searches", settings.max_searches_per_sub_agent)
+    max_opens = override.get("max_opens", 0)
+    max_finds = override.get("max_finds", settings.max_finds_per_sub_agent)
+    has_access_skill = any(
+        (str(getattr(tool, "name", "")).startswith("skill_") or getattr(tool, "name", "") == "exec")
+        for tool in tools
+    )
+    max_skills = (
+        override.get("max_skills", settings.max_skills_per_sub_agent)
+        if has_access_skill else 0
+    )
+
+    from searchos.harness.middleware import ControlState, SourceContext, TaskContext
+    from searchos.harness.middleware.pipelines import (
+        explore_pipeline,
+        local_search_pipeline,
+        web_search_pipeline,
+        writer_pipeline,
+    )
+
+    budget = BudgetState(
+        max_queries=max_searches, max_opens=max_opens,
+        max_finds=max_finds, max_skills=max_skills,
+    )
+    control = ControlState()
+    task_context = TaskContext(agent_label, assigned_task_id, target_table, task)
+
+    if agent_type == _local_search.AGENT_TYPE:
+        from searchos.local.reader.tools import reset_local_browser
+
+        if source_scope is not None:
+            from searchos.local.index.source_registry import SourceRecord
+            records = [SourceRecord.model_validate(r) for r in source_scope.get("documents", [])]
+            browser_state = reset_local_browser(
+                source_scope["index_root"],
+                source_roots=[Path(r.source_path).parent for r in records],
+                selected_documents={r.document_id: (r.source_revision, r.generation) for r in records},
+            )
+            browser_state.selected_records = {r.document_id: r for r in records}
+        else:
+            reset_local_browser()
+    elif agent_type in {_search.AGENT_TYPE, _explore.AGENT_TYPE}:
+        from searchos.tools.simple_browser import reset_browser_for_sub_agent
+
+        reset_browser_for_sub_agent()
+
+    from deepagents.backends import FilesystemBackend
+    agent_backend = FilesystemBackend(
+        root_dir=str(_ctx.workspace.path / "agent_logs"),
+        virtual_mode=False,
+    )
+
+    # Writer 使用 synthesis 角色；未绑定角色时沿用通用子 Agent 模型。
+    logger.info("Sub-agent '%s' tools: %s", agent_type, [getattr(t, "name", str(t)) for t in tools])
+    sub_agent_model = _ctx.sub_agent_model or _ctx.model
+    if agent_type == "writer_agent" and _ctx.synthesis_model is not None:
+        sub_agent_model = _ctx.synthesis_model
+    graph_options = dict(
+        model=sub_agent_model, tools=tools, system_prompt=system_prompt,
+        backend=agent_backend, name=agent_type,
+    )
+    if middleware is not None:
+        from searchos.agents.execution import bind_controls
+        from searchos.harness.middleware.pipelines import WRITER_DRAIN_TOOLS
+
+        runtime_control = bind_controls(middleware)
+        runtime_policy = None
+        if agent_type == "explore_agent" and settings.enable_explore_batch:
+            from searchos.agents.explore.policy import ExplorePolicy
+            from searchos.config.run_config import current_run_config
+
+            config = current_run_config()
+            runtime_policy = ExplorePolicy(
+                max_waves=config.explore_max_waves,
+                control=runtime_control,
+            )
+        graph = create_search_agent_graph(
+            **graph_options, middleware=middleware, workspace=_ctx.workspace,
+            trajectory_logger=_ctx.trajectory_logger, conversation_logger=_ctx.conversation_logger,
+            agent_id=agent_label, control=runtime_control, policy=runtime_policy,
+            drain_tools=WRITER_DRAIN_TOOLS if agent_type == "writer_agent" else frozenset(),
+            finish_without_tools=agent_type != "writer_agent",
+        )
+    else:
+        pipeline = {
+            "search_agent": web_search_pipeline,
+            "local_search_agent": local_search_pipeline,
+            "explore_agent": explore_pipeline,
+            "writer_agent": writer_pipeline,
+        }[agent_type]
+        options = dict(
+            workspace=_ctx.workspace, task=task_context, budget=budget, control=control,
+            agent_graphs=_ctx.agent_graphs, trajectory_logger=_ctx.trajectory_logger,
+            conversation_logger=_ctx.conversation_logger,
+        )
+        if agent_type in {"search_agent", "local_search_agent"}:
+            findings = _ctx.workspace.load_state().research_mode == "findings"
+            options.update(
+                extraction_model=_ctx.extraction_model,
+                extraction_policy="schema_facts" if findings else "task_rows",
+                final_summary=not findings,
+                source=SourceContext(workspace=_ctx.workspace, scope=source_scope),
+            )
+        graph = pipeline(**graph_options, **options)
+
+    from searchos.agents.execution import loaded_resources
+    from searchos.harness.middleware.sensor.progress_middleware import ReadingProgressMiddleware
+
+    components = getattr(graph, "middleware", middleware or ())
+    resources = loaded_resources(components)
+    source_progress = next(
+        (component.sources for component in components
+         if isinstance(component, ReadingProgressMiddleware)), set(),
+    )
+    control = next(
+        (component.control for component in components if hasattr(component, "control")),
+        getattr(graph, "control", None),
+    )
+
+    thread_id = agent_label
+
+    from searchos.tools.search_state import (
+        set_current_agent,
+        set_current_table,
+        set_current_task,
+    )
+    set_current_agent(thread_id)
+    set_current_task(task)
+    set_current_table("")
+
+    if _ctx.conversation_logger:
+        _ctx.conversation_logger.register_sub_agent(
+            agent_name=thread_id,
+            parent="orchestrator",
+            task=task,
+            system_prompt="\n\n".join(prompt_parts),
+            agent_type=agent_type,
+        )
+
+    if _ctx.trajectory_logger:
+        def _tool_schema(tool: Any) -> dict[str, Any]:
+            args_schema = getattr(tool, "args_schema", None)
+            if hasattr(args_schema, "model_json_schema"):
+                schema = args_schema.model_json_schema()
+            elif isinstance(args_schema, dict):
+                schema = args_schema
+            else:
+                schema = {}
+            return {"name": getattr(tool, "name", str(tool)), "schema": schema}
+
+        _ctx.trajectory_logger._append_raw({
+            "type": "dispatch",
+            "agent": agent_label,
+            "task": task,
+            "skills": skill_names,
+            "tool_schemas": [_tool_schema(tool) for tool in tools],
+            "static_prompt_sha256": hashlib.sha256(
+                "\n\n".join(static_assembly_parts).encode("utf-8"),
+            ).hexdigest(),
+        })
+
+    wrapped_task = task
+
+    # Pre-snapshot for AgentReport delta computation at completion time.
+    pre_snapshot = _snapshot_state_for_diff(_ctx.workspace.load_state())
+
+    _ctx.agent_graphs[agent_label] = {
+        "graph": graph,
+        "thread_id": thread_id,
+        "agent_type": agent_type,
+        "task": task,
+        "wrapped_task": wrapped_task,
+        "skill_names": list(skill_names),
+        "strategy_guidance_applied": strategy_guidance_applied,
+        "missing_skills": missing_skills,
+        "pre_snapshot": pre_snapshot,
+        "scope_entities": scope_entities,  # used by _compute_agent_report to
+                                       # filter out peer-filled cells
+        "started_at": time.time(),
+        "continue_turn_count": 1,
+        "assigned_task_id": assigned_task_id,
+        "p1_run_id": p1_run_id,
+        "target_table": target_table,
+        "extraction": resources[0] if resources else None,
+        "extractions": resources,
+        "control": control,
+        "source_progress": source_progress,
+    }
+
+    t = asyncio.create_task(
+        _collect_sub_agent_result(agent_label),
+        name=f"sub-agent:{agent_label}",
+    )
+    _ctx.task_pool[agent_label] = t
+
+    return agent_label
+async def _collect_sub_agent_result(agent_id: str) -> Any:
+    """Coroutine body of a spawned sub-agent Task.
+
+    Runs ``graph.astream`` to completion, streaming conversation messages
+    to the logger, then computes an ``AgentReport`` from the pre/post
+    state diff and registers it in ``_ctx.completed``. Returns the
+    ``AgentReport`` so ``await pool[agent_id]`` yields structured data.
+    """
+    info = _ctx.agent_graphs.get(agent_id)
+    if info is None:
+        from searchos.socm import AgentReport
+        return AgentReport(
+            agent_id=agent_id, status="error",
+            result=f"agent {agent_id} not registered — internal bug",
+        )
+
+    graph = info["graph"]
+    thread_id = info["thread_id"]
+    wrapped_task = info["wrapped_task"]
+    task_desc = info["task"]
+    pre_snapshot = info["pre_snapshot"]
+    missing_skills = info["missing_skills"]
+    started_at = info["started_at"]
+    scope_entities = info.get("scope_entities")
+    target_table = info.get("target_table", "") or ""
+    agent_type = info.get("agent_type", "search_agent")
+
+    from searchos.tools.search_state import (
+        set_current_agent,
+        set_current_table,
+        set_current_task,
+    )
+    set_current_agent(thread_id)
+    set_current_task(task_desc)
+    from searchos.tools.search_state import _current_task_id_var
+    _current_task_id_var.set(info.get("assigned_task_id", ""))
+    set_current_table(target_table)
+
+    p1_token = current_run_id.set(info.get("p1_run_id", ""))
+    try:
+        prev_msg_count = 0
+        latest_messages: list[Any] = []
+        async for event in graph.astream(
+            {"messages": [{"role": "user", "content": wrapped_task}]},
+            config={"configurable": {"thread_id": thread_id}},
+            stream_mode="values",
+        ):
+            if "messages" in event:
+                latest_messages = event["messages"]
+
+            if _ctx.conversation_logger and "messages" in event:
+                from searchos.harness.telemetry.conversation import (
+                    langchain_msg_to_conversation_msgs,
+                )
+                msgs = event["messages"]
+                for msg in msgs[prev_msg_count:]:
+                    for conv_msg in langchain_msg_to_conversation_msgs(msg):
+                        conv_msg.agent_name = thread_id
+                        conv_msg.parent_agent = "orchestrator"
+                        _ctx.conversation_logger.log(conv_msg)
+                prev_msg_count = len(msgs)
+
+        # Human-readable result. Deliberately NO global stats here: global
+        # coverage/frontier numbers in a per-agent result read as task
+        # progress and mislead the orchestrator (the SOCM block already
+        # carries global state every turn). _compute_agent_report appends
+        # this agent's OWN delta for search reports.
+        summary = "Completed"
+        if missing_skills:
+            available = (
+                [s.meta.name for s in _ctx.skill_registry.list_all()][:10]
+                if _ctx.skill_registry else []
+            )
+            summary = (
+                f"[WARN: skills {missing_skills} not found in registry. "
+                f"Available: {available}] {summary}"
+            )
+
+        # Last AIMessage with no tool_calls is the agent's end-of-run
+        # briefing (plan §一 总则 3). The orchestrator reads it to decide
+        # what to do next; explore parses it into a ExploreReport.
+        #
+        # Qwen3 / GLM-5 / DeepSeek-R1 emit thinking into a separate
+        # `reasoning_content` field and leave `content` empty. Fall back to
+        # reasoning_content so the briefing is never silently lost.
+        last_ai_text = ""
+        for msg in reversed(latest_messages):
+            if getattr(msg, "tool_calls", None):
+                continue
+            kind = getattr(msg, "type", "") or msg.__class__.__name__.lower()
+            if "ai" in kind.lower():
+                content = getattr(msg, "content", "") or ""
+                if isinstance(content, list):
+                    content = " ".join(
+                        p.get("text", "") if isinstance(p, dict) else str(p)
+                        for p in content
+                    )
+                text = str(content).strip()
+                if not text:
+                    extras = getattr(msg, "additional_kwargs", None) or {}
+                    if isinstance(extras, dict):
+                        text = str(extras.get("reasoning_content", "") or "").strip()
+                last_ai_text = text
+                break
+
+        # For explore_agent only, pluck out the raw hub pages it opened so
+        # extraction can replay over them after schema is committed.
+        explore_pages = (
+            _extract_explore_open_pages(latest_messages)
+            if agent_type == "explore_agent" else None
+        )
+
+        report = _compute_agent_report(
+            agent_id=agent_id, thread_id=thread_id,
+            pre_snapshot=pre_snapshot, started_at=started_at,
+            status="completed", result=summary,
+            scope_entities=scope_entities,
+            last_ai_text=last_ai_text,
+            explore_pages=explore_pages,
+        )
+        # Logged AFTER report computation so the live view's agent tile
+        # shows this agent's own delta (cells/evidence/draft), not a bare
+        # "Completed".
+        if _ctx.trajectory_logger:
+            _ctx.trajectory_logger._append_raw({
+                "type": "agent_complete",
+                "agent": agent_id,
+                "task": task_desc,
+                "summary": report.result,
+            })
+
+        # --- Post-mortem failure-memory trigger ---
+        # Fire when:
+        #   - status in {"error","budget_exhausted"} — the agent
+        #     crashed (RPC / runtime exception) or was hard-stopped
+        #     by the harness for blowing its search/open budget.
+        #     Set in _compute_agent_report.
+        #   - dead_ends non-empty — LoopSensor recorded specific stuck
+        #     queries on agent_dead_ends[thread_id]. Per-thread map,
+        #     so this is concurrency-safe.
+        # Deliberately NOT triggered on status=="looped" (overlaps with
+        # dead_ends but with a wider, noisier judgement) or on
+        # cells_filled==0 (concurrency-polluted: a sibling's writes
+        # also count, and many legitimate sub-agent missions are
+        # evidence-gathering and do not emit cells themselves).
+        # Gated by a per-session counter so a string of bad runs
+        # cannot burn an unbounded number of opus calls. fire-and-
+        # forget; the task writes a FailureMemory into
+        # state.strategy_log.failure_memories which the NEXT sub-agent
+        # picks up via _build_failure_memory_prompt.
+        from searchos.config.settings import settings
+        from searchos.socm import SearchReport
+        _pm_state = _ctx.workspace.load_state() if _ctx.workspace else None
+        _pm_sensor = (
+            _pm_state.agent_status.get(thread_id) if _pm_state else None
+        )
+        if (
+            settings.enable_failure_memory
+            and isinstance(report, SearchReport)
+            and _ctx.post_mortem_model is not None
+            and (
+                report.status in ("error", "budget_exhausted")
+                or _pm_sensor == "budget_exhausted"
+                or len(report.dead_ends) >= 1
+            )
+        ):
+            count_box = _post_mortem_count_var.get()
+            if (
+                count_box is not None
+                and count_box[0] < settings.max_post_mortems_per_session
+            ):
+                count_box[0] += 1
+                try:
+                    pm_task = asyncio.create_task(
+                        _run_post_mortem(thread_id, agent_id, report)
+                    )
+                    pm_tasks = _post_mortem_tasks_var.get()
+                    if pm_tasks is not None:
+                        pm_tasks.append(pm_task)
+                except RuntimeError:
+                    # No running loop — degraded path (sync caller).
+                    # Skip silently; failure memories are best-effort.
+                    pass
+
+        _ctx.completed[agent_id] = report
+        return report
+
+    except StaleExecutionError:
+        _ctx.completed.pop(agent_id, None)
+        raise
+    except Exception as e:
+        import traceback
+
+        tb = traceback.format_exc()
+        logger.error(
+            "Sub agent %s failed: %s(%s)",
+            agent_id, type(e).__name__, str(e).strip(), exc_info=True,
+        )
+        # Some exceptions stringify to "" — fall back to class name.
+        err_msg = str(e).strip() or type(e).__name__
+        if _ctx.trajectory_logger:
+            _ctx.trajectory_logger._append_raw({
+                "type": "agent_error",
+                "agent": agent_id,
+                "error": err_msg[:500],
+                "error_type": type(e).__name__,
+                "traceback": tb[-2000:],
+            })
+        report = _compute_agent_report(
+            agent_id=agent_id, thread_id=thread_id,
+            pre_snapshot=pre_snapshot, started_at=started_at,
+            status="error", result=f"Error: {err_msg}",
+            scope_entities=scope_entities,
+        )
+        _ctx.completed[agent_id] = report
+        return report
+    finally:
+        current_run_id.reset(p1_token)
+
+
+def _task_redundancy_reason(
+    state: Any, *, target_cells: list[str], table_id: str, p1_repair_revision: str = "",
+) -> str:
+    """Non-empty reason when a search task's explicit target_cells are
+    all filled. Returns "" otherwise — tasks without target_cells are
+    never rejected (they may be open-set enumeration).
+    """
+    if p1_repair_revision or not target_cells:
+        return ""
+    cmap = state.coverage_map
+    tid = table_id or (cmap.primary_table_id if cmap.tables else "")
+    keys = [c if "/" in c else (f"{tid}/{c}" if tid else c) for c in target_cells]
+    cells = [cmap.cells.get(k) for k in keys]
+    if cells and all(
+        c is not None and c.status.value == "filled" and not c.has_conflict
+        for c in cells
+    ):
+        return f"all {len(cells)} target_cells already filled"
+    return ""

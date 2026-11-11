@@ -1,0 +1,66 @@
+# Publish source code and reports only. Local data stays in this workspace.
+/*
+!/.gitignore
+!/README.md
+!/research-workbench/
+!/report/
+!/widesearch_experiment/
+!/widesearch_baselines/
+!/widesearch_fetch_backup/
+!/widesearch_odr_lite/
+!/widesearch_recovery/
+
+# Credentials and machine-specific configuration
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.template
+**/web_settings.json
+**/.workbench/
+**/.workbuddy/
+**/.runtime/
+**/*.pem
+**/*.key
+
+# Dependencies, generated files and caches
+**/.venv*/
+**/node_modules/
+**/.next/
+**/out/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.plot-cache/
+**/.DS_Store
+**/*.log
+**/*.sqlite*
+**/*.db
+**/*.zip
+**/*.tsbuildinfo
+**/test-results/
+**/playwright-report/
+
+# Business archives and runtime artifacts
+/research-workbench/data/
+/research-workbench/knowledge_base/
+/research-workbench/datasets/
+/research-workbench/assets/searchos-demo.mp4
+/research-workbench/assets/searchos-demo.gif
+
+# Keep required contracts and handoff instructions; omit extracted materials.
+/research-workbench/design/*
+!/research-workbench/design/knowledge-extraction-handoff-20261104/
+/research-workbench/design/knowledge-extraction-handoff-20261104/*
+!/research-workbench/design/knowledge-extraction-handoff-20261104/schema/
+!/research-workbench/design/knowledge-ingestion-v2/
+
+# Experiment implementation is kept separate from execution data.
+/widesearch_experiment/vendor/
+/widesearch_experiment/snapshots/
+/widesearch_experiment/results/
+/widesearch_experiment/reports/
+/widesearch_experiment/datasets/
+/widesearch_experiment/manifest.json
